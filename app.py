@@ -10,13 +10,37 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import urllib.request, shutil
 
-fm._load_fontmanager(try_read_cache=False)
-available = set(f.name for f in fm.fontManager.ttflist)
-chosen = next((f for f in ['SimHei','Microsoft YaHei'] if f in available), None)
-if chosen:
-    plt.rcParams['font.sans-serif'] = [chosen]
-    plt.rcParams['axes.unicode_minus'] = False
+# 中文字体：自动下载，跨平台兼容
+FONT_PATH = "NotoSansSC.ttf"
+FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"
+
+if not os.path.exists(FONT_PATH):
+    try:
+        urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+        print("字体下载成功")
+        # 清除缓存
+        cache = os.path.expanduser("~/.cache/matplotlib")
+        if os.path.exists(cache): shutil.rmtree(cache, ignore_errors=True)
+        fm._load_fontmanager(try_read_cache=False)
+    except:
+        print("字体下载失败，使用系统字体")
+
+if os.path.exists(FONT_PATH):
+    fm.fontManager.addfont(FONT_PATH)
+    prop = fm.FontProperties(fname=FONT_PATH)
+    font_name = prop.get_name()
+    plt.rcParams['font.sans-serif'] = [font_name, 'DejaVu Sans']
+    print(f"字体: {font_name}")
+else:
+    fm._load_fontmanager(try_read_cache=False)
+    available = set(f.name for f in fm.fontManager.ttflist)
+    chosen = next((f for f in ['SimHei','Microsoft YaHei'] if f in available), None)
+    if chosen: plt.rcParams['font.sans-serif'] = [chosen]
+    print(f"字体: {chosen or '无中文'}")
+
+plt.rcParams['axes.unicode_minus'] = False
 
 app = FastAPI(title="数据分析平台")
 app.mount("/static", StaticFiles(directory="."), name="static")
