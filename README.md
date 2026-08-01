@@ -4,7 +4,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-latest-green)
 ![Deploy](https://img.shields.io/badge/Render-online-brightgreen)
 
-在线地址：https://data-platform-7guk.onrender.com
+在线地址：https://data-platform-vp73.onrender.com
 
 ## 功能模块
 
