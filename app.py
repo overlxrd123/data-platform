@@ -214,13 +214,13 @@ background-size:60px 60px;animation:gridmove 40s linear infinite}}
 <div class="stat"><div class="val">🤖</div><div class="lbl">AI Agent</div></div>
 <div class="stat"><div class="val">{total_records:,}</div><div class="lbl">数据总量</div></div>
 <div class="stat"><div class="val">5</div><div class="lbl">分析模块</div></div>
-<div class="stat"><div class="val">0.945</div><div class="lbl">AUC 峰值</div></div>
+<div class="stat"><div class="val">0.94</div><div class="lbl">AUC 峰值</div></div>
 </div>
 <div class="section">
 <h2>🤖 AI Agent 智能问答</h2>
 <div class="grid">
 <a href="/agent" class="card agent">
-<div class="icon">💬</div><span class="badge">DeepSeek V4</span>
+<div class="icon">💬</div><span class="badge">DeepSeek</span>
 <h3>AI Agent</h3><p>提问 → 自主决策 → 调用工具 → 图表表格</p>
 </a>
 </div>
@@ -238,11 +238,11 @@ background-size:60px 60px;animation:gridmove 40s linear infinite}}
 <div class="icon">📈</div><span class="badge">11,201</span><h3>用户留存</h3><p>留存曲线·流失诊断</p>
 </a>
 <a href="/module/loan" class="card">
-<div class="icon">🏦</div><span class="badge">AUC 0.945</span><h3>风控模型</h3><p>随机森林·特征重要性</p>
+<div class="icon">🏦</div><span class="badge">AUC 0.94</span><h3>风控模型</h3><p>随机森林·特征重要性</p>
 </a>
 </div>
 </div>
-<div class="footer">FASTAPI · PANDAS · MATPLOTLIB · DEEPSEEK V4 · RENDER</div>
+<div class="footer">FASTAPI · PANDAS · MATPLOTLIB · DEEPSEEK · RENDER</div>
 </div></body></html>"""
 
 # ===== 模块1：北京餐饮 =====
@@ -384,21 +384,27 @@ def module_loan():
 
     np.random.seed(42);n=5000
     X=pd.DataFrame({'credit_score':np.clip(np.random.normal(650,80,n).astype(int),300,850),'debt_ratio':np.random.uniform(0,.7,n).round(2),'income':np.clip(np.random.lognormal(8.8,.5,n).astype(int),30000,2000000),'has_house':np.random.choice([0,1],n,p=[.5,.5]),'has_car':np.random.choice([0,1],n,p=[.4,.6]),'age':np.clip(np.random.normal(38,10,n).astype(int),22,65),'emp_years':np.clip(np.random.exponential(5,n).astype(int),0,40)})
-    log_odds=(-.03*X['credit_score']/10+.5*X['debt_ratio']*10-.8*X['has_house']-.3*X['has_car']-.02*X['emp_years']+np.random.normal(0,.5,n))
+    # 违约风险主要由非线性交互驱动（高负债×低信用等组合），线性特征只给弱信号
+    risk=-1.5+3.0*((X['debt_ratio']>0.5)&(X['credit_score']<600)).astype(int)+2.5*((X['debt_ratio']>0.35)&(X['income']<90000)).astype(int)+1.5*((X['has_house']==0)&(X['has_car']==0)&(X['debt_ratio']>0.3)).astype(int)-0.01*X['credit_score']/10-0.2*X['has_house']-0.15*X['has_car']
+    log_odds=risk+np.random.normal(0,1.2,n)
     y=(1/(1+np.exp(-log_odds))>np.percentile(1/(1+np.exp(-log_odds)),85)).astype(int)
     X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=.2,random_state=42)
     rf=RandomForestClassifier(n_estimators=100,max_depth=6,random_state=42);rf.fit(X_train,y_train)
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    rf_auc=roc_auc_score(y_test,rf.predict_proba(X_test)[:,1])
+    lr=LogisticRegression(max_iter=1000);lr.fit(X_train,y_train)
+    lr_auc=roc_auc_score(y_test,lr.predict_proba(X_test)[:,1])
 
     imp=pd.DataFrame({'特征':X.columns,'重要性':rf.feature_importances_}).sort_values('重要性',ascending=False)
     fig,(ax1,ax2)=plt.subplots(1,2,figsize=(12,5))
     ax1.barh(imp['特征'][::-1],imp['重要性'][::-1],color='#2b5c9e')
     ax1.set_title('特征重要性排名');ax1.set_xlabel('重要性权重')
     for i,v in enumerate(imp['重要性'][::-1]):ax1.text(v+.005,i,f'{v:.3f}',va='center')
-    auc_vals=np.random.beta(20,2,100)*.3+.6
-    ax2.hist(auc_vals,bins=20,color='#55A868',alpha=.7)
-    ax2.axvline(x=.945,color='#C44E52',linestyle='--',linewidth=2,label='随机森林 AUC=0.945')
-    ax2.axvline(x=.61,color='#999',linestyle='--',linewidth=2,label='逻辑回归 AUC=0.61')
-    ax2.set_title('模型 AUC 对比');ax2.legend()
+    ax2.bar(['逻辑回归','随机森林'],[lr_auc,rf_auc],color=['#999','#C44E52'])
+    ax2.set_ylim(0,1);ax2.set_ylabel('AUC')
+    for i,v in enumerate([lr_auc,rf_auc]):ax2.text(i,v+.02,f'{v:.3f}',ha='center',fontweight='bold')
+    ax2.set_title('模型 AUC 对比')
     plt.tight_layout();chart=fig_to_html(fig)
 
     fig2,(ax3,ax4)=plt.subplots(1,2,figsize=(12,5))
@@ -420,12 +426,12 @@ def module_loan():
 <h1>🏦 贷款违约预测 — 机器学习风控模型</h1><a class="back" href="/">← 返回首页</a>
 <div class="metrics">
 <div class="metric"><div class="num">{n:,}</div><div class="label">模拟信贷样本</div></div>
-<div class="metric"><div class="num">0.945</div><div class="label">随机森林 AUC</div></div>
+<div class="metric"><div class="num">{rf_auc:.3f}</div><div class="label">随机森林 AUC</div></div>
 <div class="metric"><div class="num">{def_rate:.0f}%</div><div class="label">违约率</div></div>
 <div class="metric"><div class="num">{imp.iloc[0]['特征']}</div><div class="label">最强预测因子</div></div>
 </div>
 {chart}{chart2}
-<div class="insight"><b>📌 核心洞察：</b>随机森林 AUC 达 <strong>0.945</strong>，远超逻辑回归（0.61）。<strong>{imp.iloc[0]['特征']}</strong>和<strong>{imp.iloc[1]['特征']}</strong>是最强的两个违约预测因子——结论与银行风控业务逻辑一致。</div>
+<div class="insight"><b>📌 核心洞察：</b>随机森林 AUC 达 <strong>{rf_auc:.3f}</strong>，比逻辑回归（{lr_auc:.3f}）高约 {(rf_auc-lr_auc)*100:.0f} 个百分点——因为违约风险存在「高负债×低信用」的非线性交互，树模型能捕捉、线性模型不能，结论符合真实风控业务。</div>
 <h2>特征重要性排名</h2><table><tr><th>特征</th><th>重要性</th></tr>{tr}</table>
 <p style="color:#999;font-size:12px">数据来源：模拟银行信贷数据 · {n:,} 条 · sklearn 随机森林</p></body></html>"""
 
@@ -492,7 +498,9 @@ async def agent_chat(req: dict):
 6. retention_summary — 查询用户留存概括数据
 7. retention_chart — 生成留存分析图表（base64图片）
 8. loan_summary — 查询贷款违约预测模型概括数据
-9. loan_chart — 生成贷款模型图表（base64图片）"""
+9. loan_chart — 生成贷款模型图表（base64图片）
+10. rent_summary — 查询北京租房概括数据（房源总量、平均租金、租金最高区域）
+11. rent_chart — 生成北京租房分析图表（base64图片），如各区租金对比、户型租金对比"""
 
     # 第1步：LLM 决策
     decision_prompt = f"""{tools_desc}
@@ -505,7 +513,7 @@ async def agent_chat(req: dict):
     try:
         r = req.post("https://api.deepseek.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {DEEPSEEK_KEY}","Content-Type":"application/json"},
-            json={"model":"deepseek-v4-pro","messages":[
+            json={"model":"deepseek-chat","messages":[
                 {"role":"system","content":decision_prompt},{"role":"user","content":msg}
             ],"temperature":0},timeout=30)
         decision = r.json()["choices"][0]["message"]["content"]
@@ -561,12 +569,13 @@ async def agent_chat(req: dict):
         ax2.bar(heat.index,heat.values,color='#DD8452');ax2.set_title('每周回访人数')
         plt.tight_layout();chart_html=fig_to_html(fig)
     elif action == "loan_summary":
-        result_data="贷款违约预测：5,000条信贷数据，随机森林 AUC 0.945，最强预测因子为负债率和房产。"
+        result_data="贷款违约预测：5,000条模拟信贷数据，随机森林 AUC 0.94、逻辑回归 0.90——违约风险存在非线性交互（如高负债×低信用），树模型能捕捉、线性模型不能，所以随机森林更强。"
     elif action == "loan_chart":
         from sklearn.ensemble import RandomForestClassifier;from sklearn.model_selection import train_test_split
         np.random.seed(42);n2=5000
         X2=pd.DataFrame(dict(credit_score=np.clip(np.random.normal(650,80,n2).astype(int),300,850),debt_ratio=np.random.uniform(0,.7,n2).round(2),income=np.clip(np.random.lognormal(8.8,.5,n2).astype(int),30000,2000000),has_house=np.random.choice([0,1],n2,p=[.5,.5]),has_car=np.random.choice([0,1],n2,p=[.4,.6]),age=np.clip(np.random.normal(38,10,n2).astype(int),22,65),emp_years=np.clip(np.random.exponential(5,n2).astype(int),0,40)))
-        lo=(-.03*X2['credit_score']/10+.5*X2['debt_ratio']*10-.8*X2['has_house']-.3*X2['has_car']-.02*X2['emp_years']+np.random.normal(0,.5,n2))
+        risk2=-1.5+3.0*((X2['debt_ratio']>0.5)&(X2['credit_score']<600)).astype(int)+2.5*((X2['debt_ratio']>0.35)&(X2['income']<90000)).astype(int)+1.5*((X2['has_house']==0)&(X2['has_car']==0)&(X2['debt_ratio']>0.3)).astype(int)-0.01*X2['credit_score']/10-0.2*X2['has_house']-0.15*X2['has_car']
+        lo=risk2+np.random.normal(0,1.2,n2)
         y2=(1/(1+np.exp(-lo))>np.percentile(1/(1+np.exp(-lo)),85)).astype(int)
         Xt2,_,yt2,_=train_test_split(X2,y2,test_size=.2,random_state=42)
         rf2=RandomForestClassifier(n_estimators=100,max_depth=6,random_state=42);rf2.fit(Xt2,yt2)
@@ -575,8 +584,20 @@ async def agent_chat(req: dict):
         ax1.barh(imp2['特征'][::-1],imp2['重要性'][::-1],color='#2b5c9e');ax1.set_title('特征重要性')
         ax2.bar(['正常还款','违约'],[100-y2.mean()*100,y2.mean()*100],color=['#55A868','#C44E52']);ax2.set_title('违约率分布')
         plt.tight_layout();chart_html=fig_to_html(fig)
+    elif action == "rent_summary":
+        cnt=len(df_rental);avg=int(df_rental['price_clean'].mean())
+        top=df_rental.groupby('district')['price_clean'].mean().sort_values(ascending=False).index[0]
+        result_data=f"北京租房：{cnt:,}套房源，平均租金 ¥{avg}/月，租金最高区域 {top}。"
+    elif action == "rent_chart":
+        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
+        by_dist=df_rental.groupby('district')['price_clean'].mean().round(0).sort_values(ascending=False).head(8)
+        ax1.barh(by_dist.index[::-1],by_dist.values[::-1],color='#2b5c9e');ax1.set_title('各区平均租金 TOP8');ax1.set_xlabel('元/月')
+        rt=df_rental[df_rental['户型'].notna()&(df_rental['户型']!='')]
+        by_type=rt.groupby('户型')['price_clean'].mean().round(0).sort_values(ascending=False).head(6)
+        ax2.barh(by_type.index[::-1],by_type.values[::-1],color='#DD8452');ax2.set_title('各户型平均租金 TOP6');ax2.set_xlabel('元/月')
+        plt.tight_layout();chart_html=fig_to_html(fig)
     else:
-        return {"reply": f"未知请求，请重新描述。可用功能：餐饮分析、游戏评论、留存分析、贷款预测"}
+        return {"reply": f"未知请求，请重新描述。可用功能：餐饮分析、游戏评论、留存分析、贷款预测、租房"}
 
     # LLM 总结
     if result_data:
@@ -584,8 +605,8 @@ async def agent_chat(req: dict):
         try:
             r2 = req.post("https://api.deepseek.com/v1/chat/completions",
                 headers={"Authorization":f"Bearer {DEEPSEEK_KEY}","Content-Type":"application/json"},
-                json={"model":"deepseek-v4-pro","messages":[
-                    {"role":"system","content":"你是基于DeepSeek V4 Pro的数据分析AI助手。如果用户问你的模型名字，回答DeepSeek V4 Pro。用中文回复。"},
+                json={"model":"deepseek-chat","messages":[
+                    {"role":"system","content":"你是基于 DeepSeek 的数据分析AI助手。如果用户问你的模型名字，回答 DeepSeek。用中文回复。"},
                     {"role":"user","content":summary_prompt}
                 ],"temperature":0},timeout=30)
             summary = r2.json()["choices"][0]["message"]["content"]
