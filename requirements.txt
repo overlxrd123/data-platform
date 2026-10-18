@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pandas
 numpy
-matplotlib
 openpyxl
 scikit-learn
+nltk
 requests

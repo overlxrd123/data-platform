@@ -1,624 +1,1235 @@
+"""全栈数据分析平台 — 六个分析模块 + 多轮工具编排 Agent。
+
+页面只负责渲染，所有业务口径集中在 analysis/ 下；页面、JSON API 与 Agent
+共用同一份分析结果，避免同一个指标出现两套算法。
 """
-全栈数据分析平台 — 四个分析模块
-北京餐饮 | 游戏评论 | 用户留存 | 贷款预测
-"""
-from fastapi import FastAPI, Query
+import json
+import os
+
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-import pandas as pd, numpy as np, io, base64, os, sqlite3
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-import urllib.request, shutil
 
-# 中文字体：自动下载，跨平台兼容
-FONT_PATH = "NotoSansSC.ttf"
-FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"
+from analysis.food import get_food_analysis, recommend_food
+from analysis.game import get_game_analysis
+from analysis.retention import get_retention_analysis
+from analysis.loan import get_loan_analysis
+from analysis.rental import get_rental_analysis
+from analysis.jobs import get_jobs_analysis
 
-if not os.path.exists(FONT_PATH):
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_env_file(path):
+    """读取本地 .env（不覆盖已有环境变量），方便本地调试 API Key。"""
     try:
-        urllib.request.urlretrieve(FONT_URL, FONT_PATH)
-        print("字体下载成功")
-        # 清除缓存
-        cache = os.path.expanduser("~/.cache/matplotlib")
-        if os.path.exists(cache): shutil.rmtree(cache, ignore_errors=True)
-        fm._load_fontmanager(try_read_cache=False)
-    except:
-        print("字体下载失败，使用系统字体")
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[7:].strip()
+                os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+    except OSError:
+        pass
 
-if os.path.exists(FONT_PATH):
-    fm.fontManager.addfont(FONT_PATH)
-    prop = fm.FontProperties(fname=FONT_PATH)
-    font_name = prop.get_name()
-    plt.rcParams['font.sans-serif'] = [font_name, 'DejaVu Sans']
-    print(f"字体: {font_name}")
-else:
-    fm._load_fontmanager(try_read_cache=False)
-    available = set(f.name for f in fm.fontManager.ttflist)
-    chosen = next((f for f in ['SimHei','Microsoft YaHei'] if f in available), None)
-    if chosen: plt.rcParams['font.sans-serif'] = [chosen]
-    print(f"字体: {chosen or '无中文'}")
 
-plt.rcParams['axes.unicode_minus'] = False
+_load_env_file(os.path.join(BASE_DIR, ".env"))
 
-app = FastAPI(title="数据分析平台")
-app.mount("/static", StaticFiles(directory="."), name="static")
+app = FastAPI(title="全栈数据分析平台", docs_url="/api/docs")
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
-print("加载数据...")
-df_rental = pd.read_csv("lianjia_bj_rent.csv", encoding='gbk')
-df_game = pd.read_csv("Metacriticgames8.csv")
-df_food = pd.read_excel("bj_food_analysis.xlsx")
-print("数据就绪")
+DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
 
-# 生成留存数据
-np.random.seed(42)
-dates = pd.date_range('2024-01-01','2024-12-31',freq='D')
-regs = np.random.poisson(50,365)
-weekly_ret = [1.0,0.40,0.25,0.15,0.10]
-weeks_data = []
-for wk, rate in enumerate(weekly_ret):
-    for day, n in enumerate(regs):
-        if day+wk*7 < 365:
-            weeks_data.append({'week':wk+1,'day':day,'retained':np.random.binomial(int(n),rate),'new_users':n})
-df_retention = pd.DataFrame(weeks_data)
+MODULES = [
+    {
+        "slug": "food", "icon": "🍽️", "title": "北京餐饮",
+        "en": "RESTAURANT", "count": "44,512", "accent": "#22d3ee",
+        "desc": "把 0 元人均识别为缺失值后，重新计算价格带、菜系、区域与评分；顺带检查评论集中度和米其林分层。",
+        "tags": ["缺失值口径", "评论集中度", "价格分层"],
+    },
+    {
+        "slug": "game", "icon": "🎮", "title": "游戏评论",
+        "en": "GAME REVIEWS", "count": "2,531", "accent": "#8b5cf6",
+        "desc": "VADER 文本情感与用户评分的对照：一致率只有 61.1%，玩家嘴上夸、手上打低分的情况真实存在。",
+        "tags": ["VADER", "TF-IDF", "主题词典"],
+    },
+    {
+        "slug": "retention", "icon": "📈", "title": "用户留存",
+        "en": "RETENTION", "count": "20,301", "accent": "#34d399",
+        "desc": "53 个注册周队列、8 周留存矩阵；首周流失 49.1%，渠道质量差异远大于设备差异。",
+        "tags": ["队列分析", "条件流失", "渠道质量"],
+    },
+    {
+        "slug": "loan", "icon": "🏦", "title": "贷款违约",
+        "en": "CREDIT RISK", "count": "5,000", "accent": "#f59e0b",
+        "desc": "随机森林 AUC 0.939、KS 0.735；按业务成本推导最优阈值 0.25，而不是默认的 0.5。",
+        "tags": ["ROC / PR", "阈值收益", "概率校准"],
+    },
+    {
+        "slug": "rental", "icon": "🏘️", "title": "北京租房",
+        "en": "BEIJING RENTAL", "count": "35,082", "accent": "#60a5fa",
+        "desc": "整租与合租必须分开算；面积与单价的关系主要是除法效应，配套字段几乎没有解释力。",
+        "tags": ["分房型口径", "除法效应", "字段质量"],
+    },
+    {
+        "slug": "jobs", "icon": "💼", "title": "数据岗招聘",
+        "en": "DATA JOBS", "count": "3,523", "accent": "#f472b6",
+        "desc": "解析混合格式薪资并剔除 49.9% 的伪数据岗；算法 25,000，数据分析 12,500。",
+        "tags": ["薪资解析", "岗位去噪", "控制变量"],
+    },
+]
 
-# 清洗
-df_rental['district'] = df_rental['区'].fillna('未知').apply(lambda x: x.split('-')[0].replace('区',''))
-df_rental['price_clean'] = df_rental['价格_元']
-df_game['sentiment'] = df_game['Rating'].apply(lambda r: '好评' if r>=7 else ('差评' if r<=3 else '中评'))
-df_food['rating_clean'] = df_food['评分'].fillna(0)
+MODULE_MAP = {m["slug"]: m for m in MODULES}
 
-# ===== 工具函数 =====
-def fig_to_html(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
-    buf.seek(0); img = base64.b64encode(buf.read()).decode(); buf.close(); plt.close(fig)
-    return f'<img src="data:image/png;base64,{img}" style="max-width:100%;border-radius:8px;">'
 
-# 公共 CSS（黑灰+橙色点缀）
-COMMON_CSS = """body{font-family:'Microsoft YaHei',sans-serif;max-width:960px;margin:20px auto;padding:20px;background:#080c14;color:#cbd5e1;min-height:100vh}
-h1{color:#f97316}a{color:#f97316}.back{display:inline-block;margin-bottom:16px}
-.metrics{display:flex;gap:16px;margin:20px 0;flex-wrap:wrap}
-.metric{background:#111827;border:1px solid#1e293b;border-radius:10px;padding:18px 20px;flex:1;min-width:140px;text-align:center}
-.metric .num{font-size:1.6em;font-weight:700;color:#f97316}.metric .label{font-size:.8em;color:#64748b;margin-top:4px}
-table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;background:#111827;border-radius:8px;overflow:hidden}
-th,td{border:1px solid#1e293b;padding:10px;text-align:center;color:#cbd5e1}th{background:#f97316;color:#0f0f0f}
-.insight{background:rgba(249,115,22,.08);border-left:3px solid#f97316;padding:14px 18px;margin:20px 0;border-radius:0 8px 8px 0;color:#cbd5e1;font-size:14px;line-height:1.7}
-.flex2{display:flex;gap:20px;flex-wrap:wrap}.flex2>div{flex:1;min-width:300px}
-/* 粒子 */
-.particle{position:fixed;pointer-events:none;z-index:0;width:2px;height:2px;background:#fff;border-radius:50%;box-shadow:0 0 6px #fff,0 0 12px rgba(59,130,246,.6)}
-.p1{top:10%;left:5%;animation:fly1 6s linear infinite}
-.p2{top:25%;left:15%;animation:fly2 8s linear infinite;width:1px;height:1px}
-.p3{top:45%;left:80%;animation:fly3 7s linear infinite;width:3px;height:3px;box-shadow:0 0 10px #fff,0 0 20px rgba(249,115,22,.5)}
-.p4{top:60%;left:30%;animation:fly4 9s linear infinite;width:1.5px;height:1.5px}
-.p5{top:75%;left:70%;animation:fly1 7.5s linear infinite}
-.p6{top:35%;left:50%;animation:fly3 10s linear infinite;width:2.5px;height:2.5px;box-shadow:0 0 8px #fff,0 0 16px rgba(96,165,250,.5)}
-.p7{top:80%;left:10%;animation:fly2 6.5s linear infinite;width:1px;height:1px}
-.p8{top:15%;left:60%;animation:fly4 8.5s linear infinite;width:2px;height:2px;box-shadow:0 0 8px #fff,0 0 18px rgba(59,130,246,.5)}
-@keyframes fly1{0%{transform:translate(0,0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(500px,-200px);opacity:0}}
-@keyframes fly2{0%{transform:translate(0,0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(-300px,-300px);opacity:0}}
-@keyframes fly3{0%{transform:translate(0,0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(400px,200px);opacity:0}}
-@keyframes fly4{0%{transform:translate(0,0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(-500px,150px);opacity:0}}
-.particles-tag{display:none}"""
+def _nav(active=""):
+    links = [("", "首页")] + [(m["slug"], m["title"]) for m in MODULES]
+    items = []
+    for slug, label in links:
+        href = "/" if slug == "" else f"/module/{slug}"
+        cls = "active" if active == slug else ""
+        items.append(f'<a href="{href}" class="{cls}">{label}</a>')
+    items.append('<a href="/agent" class="agent-link">AI Agent</a>')
+    return f'<nav class="nav">{"".join(items)}</nav>'
+
+
+def _head(title, desc=""):
+    return f"""<meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{desc or 'FastAPI + Pandas + Scikit-learn + ECharts 数据分析平台'}">
+  <title>{title} · 全栈数据分析平台</title>
+  <link rel="stylesheet" href="/static/app.css">"""
+
+
+def _topbar(active=""):
+    return f"""<header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/"><span class="brand-mark">◈</span>数据平台 · DataLab</a>
+      {_nav(active)}
+    </div>
+  </header>"""
+
+
+def _footer():
+    return """<footer class="footer">
+    <div class="footer-inner">
+      <span>FastAPI · Pandas · Scikit-learn · ECharts 5 · VADER</span>
+      <span>分析层与页面 / API / Agent 共用同一套口径</span>
+    </div>
+  </footer>"""
+
 
 # ===== 首页 =====
 @app.get("/", response_class=HTMLResponse)
 def home():
-    total_records = len(df_food) + len(df_game) + 5000
-    total_users = int(df_retention['new_users'].sum())
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>数据分析平台</title><style>
-:root{{--bg:#060a13;--card:#111827;--border:#1e293b;--orange:#f97316;--text:#cbd5e1;--muted:#64748b}}
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:linear-gradient(rgba(0,5,30,.65),rgba(0,5,30,.65)),url(/static/big-spaceship.jpg) no-repeat center center;background-size:cover;background-attachment:fixed;color:#fff;min-height:100vh;overflow-x:hidden}}
-/* 星空背景 */
-.stars{{position:fixed;inset:0;pointer-events:none;z-index:0}}
-.stars::before,.stars::after{{content:'';position:absolute;inset:0;background:
-radial-gradient(1px 1px at 10% 15%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 20% 45%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 30% 75%,#fff 0%,transparent 100%),
-radial-gradient(2px 2px at 45% 10%,rgba(59,130,246,.7) 0%,transparent 100%),
-radial-gradient(1px 1px at 55% 35%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 65% 65%,#fff 0%,transparent 100%),
-radial-gradient(2px 2px at 75% 20%,rgba(249,115,22,.5) 0%,transparent 100%),
-radial-gradient(1px 1px at 85% 55%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 95% 80%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 5% 90%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 40% 85%,#fff 0%,transparent 100%),
-radial-gradient(2px 2px at 60% 5%,rgba(59,130,246,.6) 0%,transparent 100%),
-radial-gradient(1px 1px at 70% 40%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 90% 10%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 15% 30%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 50% 70%,#fff 0%,transparent 100%)
-;background-size:200px 200px}}
-.stars::after{{background-size:300px 300px;animation:starfield 30s linear infinite;opacity:.4;background-image:
-radial-gradient(1px 1px at 5% 5%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 33% 22%,#fff 0%,transparent 100%),
-radial-gradient(2px 2px at 52% 18%,rgba(59,130,246,.5) 0%,transparent 100%),
-radial-gradient(1px 1px at 71% 42%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 18% 60%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 88% 68%,#fff 0%,transparent 100%),
-radial-gradient(2px 2px at 25% 78%,rgba(249,115,22,.5) 0%,transparent 100%),
-radial-gradient(1px 1px at 62% 88%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 8% 40%,#fff 0%,transparent 100%),
-radial-gradient(1px 1px at 48% 52%,#fff 0%,transparent 100%)
-}}
-@keyframes starfield{{0%{{transform:translate(0,0)}}100%{{transform:translate(-100px,-50px)}}}}
-/* 飞行粒子 */
-.particle{{position:fixed;pointer-events:none;z-index:0;width:2px;height:2px;background:#fff;border-radius:50%;box-shadow:0 0 6px #fff,0 0 12px rgba(59,130,246,.6)}}
-.p1{{top:10%;left:5%;animation:fly1 6s linear infinite}}
-.p2{{top:25%;left:15%;animation:fly2 8s linear infinite;width:1px;height:1px}}
-.p3{{top:45%;left:80%;animation:fly3 7s linear infinite;width:3px;height:3px;box-shadow:0 0 10px #fff,0 0 20px rgba(249,115,22,.5)}}
-.p4{{top:60%;left:30%;animation:fly4 9s linear infinite;width:1.5px;height:1.5px}}
-.p5{{top:75%;left:70%;animation:fly1 7.5s linear infinite}}
-.p6{{top:35%;left:50%;animation:fly3 10s linear infinite;width:2.5px;height:2.5px;box-shadow:0 0 8px #fff,0 0 16px rgba(96,165,250,.5)}}
-.p7{{top:80%;left:10%;animation:fly2 6.5s linear infinite;width:1px;height:1px}}
-.p8{{top:15%;left:60%;animation:fly4 8.5s linear infinite;width:2px;height:2px;box-shadow:0 0 8px #fff,0 0 18px rgba(59,130,246,.5)}}
-@keyframes fly1{{0%{{transform:translate(0,0);opacity:0}}10%{{opacity:1}}90%{{opacity:1}}100%{{transform:translate(500px,-200px);opacity:0}}}}
-@keyframes fly2{{0%{{transform:translate(0,0);opacity:0}}10%{{opacity:1}}90%{{opacity:1}}100%{{transform:translate(-300px,-300px);opacity:0}}}}
-@keyframes fly3{{0%{{transform:translate(0,0);opacity:0}}10%{{opacity:1}}90%{{opacity:1}}100%{{transform:translate(400px,200px);opacity:0}}}}
-@keyframes fly4{{0%{{transform:translate(0,0);opacity:0}}10%{{opacity:1}}90%{{opacity:1}}100%{{transform:translate(-500px,150px);opacity:0}}}}
-/* 星云光晕 */
-.nebula{{position:fixed;inset:0;pointer-events:none;z-index:0;background:
-radial-gradient(ellipse at 30% 30%,rgba(59,130,246,.06) 0%,transparent 50%),
-radial-gradient(ellipse at 65% 55%,rgba(96,165,250,.04) 0%,transparent 45%),
-radial-gradient(ellipse at 50% 70%,rgba(249,115,22,.03) 0%,transparent 50%);
-animation:nebula 20s ease-in-out infinite}}
-@keyframes nebula{{0%,100%{{opacity:.8}}50%{{opacity:.4}}}}
-/* 网格线 */
-.grid-bg{{position:fixed;inset:0;pointer-events:none;z-index:0;background:
-linear-gradient(rgba(59,130,246,.025) 1px,transparent 1px),
-linear-gradient(90deg,rgba(59,130,246,.025) 1px,transparent 1px);
-background-size:60px 60px;animation:gridmove 40s linear infinite}}
-@keyframes gridmove{{0%{{transform:translate(0,0)}}100%{{transform:translate(60px,60px)}}}}
-/* 激光扫描线 */
-.laser{{position:fixed;top:0;left:-200px;width:2px;height:300px;background:linear-gradient(to bottom,transparent,rgba(96,165,250,.25),transparent);pointer-events:none;z-index:0;animation:laser1 10s ease-in-out infinite;transform:rotate(-25deg)}}
-@keyframes laser1{{0%,100%{{left:-200px;opacity:0}}25%{{opacity:.5}}60%{{left:120%;opacity:0}}}}
+    cards = []
+    for m in MODULES:
+        tags = "".join(f'<span class="tag">{t}</span>' for t in m["tags"])
+        cards.append(f"""
+        <a class="module-card" href="/module/{m['slug']}" style="--accent:{m['accent']}">
+          <div class="icon">{m['icon']}</div>
+          <h3>{m['title']}</h3>
+          <p>{m['desc']}</p>
+          <div class="chips">{tags}</div>
+          <div class="card-stats">
+            <div><b>{m['count']}</b><span>数据记录</span></div>
+            <div><b>{m['en']}</b><span>MODULE</span></div>
+          </div>
+          <span class="go">→</span>
+        </a>""")
 
-.content{{position:relative;z-index:1}}
-.hero{{padding:90px 20px 70px;text-align:center;position:relative}}
-.hero h1{{font-size:3em;font-weight:800;letter-spacing:4px;background:linear-gradient(135deg,#fff 0%,#b3d4ff 30%,#f97316 70%,#fff 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:titleglow 3s ease-in-out infinite}}
-@keyframes titleglow{{0%,100%{{filter:brightness(1)}}50%{{filter:brightness(1.3)}}}}
-.hero p{{font-size:1.05em;color:var(--muted);margin-top:12px;font-weight:300;letter-spacing:2px}}
-.stats{{max-width:1100px;margin:-20px auto 0;display:flex;gap:14px;padding:0 20px;flex-wrap:wrap;justify-content:center;position:relative;z-index:1}}
-.stat{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px 30px;text-align:center;min-width:140px;flex:1;backdrop-filter:blur(10px)}}
-.stat:hover{{border-color:var(--orange)}}
-.stat .val{{font-size:1.9em;font-weight:800;color:var(--orange)}}
-.stat .lbl{{font-size:.78em;color:var(--muted);margin-top:4px}}
-.section{{max-width:1100px;margin:48px auto 0;padding:0 20px;position:relative;z-index:1}}
-.section h2{{font-size:1.25em;color:#e2e8f0;margin-bottom:22px;font-weight:700;padding-left:14px;border-left:3px solid var(--orange)}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}}
-.card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:32px 24px;transition:all .3s;text-decoration:none;color:var(--text);display:block;position:relative;overflow:hidden;backdrop-filter:blur(10px)}}
-.card::after{{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--orange),transparent);opacity:0;transition:opacity .3s}}
-.card:hover{{transform:translateY(-4px);border-color:var(--orange);box-shadow:0 0 30px rgba(249,115,22,.1),0 4px 16px rgba(0,0,0,.3)}}
-.card:hover::after{{opacity:1}}
-.card .icon{{font-size:2.4em;margin-bottom:12px;display:block}}
-.card .badge{{position:absolute;top:12px;right:12px;background:rgba(249,115,22,.1);color:var(--orange);font-size:.7em;padding:3px 10px;border-radius:8px;font-weight:600;letter-spacing:.5px}}
-.card h3{{font-size:1em;margin-bottom:6px;color:#e2e8f0;font-weight:700}}
-.card p{{font-size:.82em;color:var(--muted);line-height:1.5}}
-.card.agent{{border-color:rgba(249,115,22,.4);background:linear-gradient(135deg,var(--card),#1a1520)}}
-.card.agent .badge{{background:var(--orange);color:#0f0f0f;font-weight:700}}
-.card.agent .icon{{font-size:3em}}
-.footer{{text-align:center;padding:50px 20px 30px;color:#334155;font-size:.78em;letter-spacing:1px;position:relative;z-index:1}}
-</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<div class="stars"></div><div class="nebula"></div><div class="grid-bg"></div><div class="laser"></div>
-<!-- 飞行粒子流星 -->
-<div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<div class="content">
-<div class="hero">
-<h1>数据分析平台</h1>
-<p>AI AGENT DRIVEN · 全栈数据服务 · 四大分析模块</p>
-</div>
-<div class="stats">
-<div class="stat"><div class="val">🤖</div><div class="lbl">AI Agent</div></div>
-<div class="stat"><div class="val">{total_records:,}</div><div class="lbl">数据总量</div></div>
-<div class="stat"><div class="val">5</div><div class="lbl">分析模块</div></div>
-<div class="stat"><div class="val">0.94</div><div class="lbl">AUC 峰值</div></div>
-</div>
-<div class="section">
-<h2>🤖 AI Agent 智能问答</h2>
-<div class="grid">
-<a href="/agent" class="card agent">
-<div class="icon">💬</div><span class="badge">DeepSeek</span>
-<h3>AI Agent</h3><p>提问 → 自主决策 → 调用工具 → 图表表格</p>
-</a>
-</div>
-</div>
-<div class="section">
-<h2>📊 数据分析模块</h2>
-<div class="grid">
-<a href="/module/food" class="card">
-<div class="icon">🍽️</div><span class="badge">44,512</span><h3>餐饮分析</h3><p>菜系·区域·价格</p>
-</a>
-<a href="/module/game" class="card">
-<div class="icon">🎮</div><span class="badge">2,531</span><h3>游戏评论</h3><p>情感·平台·评分</p>
-</a>
-<a href="/module/retention" class="card">
-<div class="icon">📈</div><span class="badge">11,201</span><h3>用户留存</h3><p>留存曲线·流失诊断</p>
-</a>
-<a href="/module/loan" class="card">
-<div class="icon">🏦</div><span class="badge">AUC 0.94</span><h3>风控模型</h3><p>随机森林·特征重要性</p>
-</a>
-</div>
-</div>
-<div class="footer">FASTAPI · PANDAS · MATPLOTLIB · DEEPSEEK · RENDER</div>
-</div></body></html>"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head>
+  {_head("数据分析平台", "六个数据分析模块、统一分析层与多轮工具编排 Agent")}
+</head><body>
+  {_topbar("")}
+  <main class="container">
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">Full-stack Data Analysis · 2026</div>
+          <h1>把数据问题<br><span class="gradient-text">从口径做到结论</span></h1>
+          <p class="lead">六个真实/模拟数据集，覆盖缺失值、文本情感、队列留存、风控阈值、合成数据识别与薪资解析。每个结论都能追溯到代码里的统计口径，而不是一张好看的图。</p>
+          <div class="hero-actions">
+            <a class="btn primary" href="/module/food">开始探索 →</a>
+            <a class="btn" href="/agent">向 Agent 提问</a>
+            <a class="btn" href="/api/docs">API 文档</a>
+          </div>
+        </div>
+        <div class="hero-stats">
+          <div class="hero-stat"><div class="value">110,949</div><div class="label">清洗前后数据记录</div></div>
+          <div class="hero-stat"><div class="value">6</div><div class="label">业务分析模块</div></div>
+          <div class="hero-stat"><div class="value">1</div><div class="label">统一分析层</div></div>
+          <div class="hero-stat"><div class="value">多轮</div><div class="label">Agent 工具编排</div></div>
+        </div>
+      </div>
+    </section>
 
-# ===== 模块1：北京餐饮 =====
+    <section>
+      <div class="eyebrow">Modules</div>
+      <h2 style="font-size:22px;letter-spacing:-.02em;margin-bottom:4px">六个模块，六种数据问题</h2>
+      <p style="color:var(--muted);font-size:13.5px;max-width:760px">每个模块都先回答「这份数据能信到什么程度」，再给业务结论。标注为模拟的数据会写明生成机制，不把假设当事实。</p>
+      <div class="module-grid">{''.join(cards)}</div>
+    </section>
+
+    <section style="margin-top:44px">
+      <div class="eyebrow">Principles</div>
+      <div class="grid-3">
+        <div class="panel">
+          <h2>先检查数据，再解释现象</h2>
+          <p class="hint">0 元人均是未采集、评论评分与文本情感会错位、租房配套字段接近随机、招聘发布时间是抓取伪影——这些发现决定了后面的结论能不能写。</p>
+        </div>
+        <div class="panel">
+          <h2>同一个指标只有一套算法</h2>
+          <p class="hint">analysis/ 下的纯计算层同时驱动页面、JSON API 和 Agent。改一次口径，三处同步，不会出现页面和回答对不上的情况。</p>
+        </div>
+        <div class="panel">
+          <h2>结论必须带数字与边界</h2>
+          <p class="hint">每条 insight 都引用具体统计量，并标注样本量、置信边界或不可外推的原因；模拟数据会明确标注，不伪装成真实业务。</p>
+        </div>
+      </div>
+    </section>
+
+    <section style="margin-top:44px">
+      <div class="eyebrow">Architecture</div>
+      <div class="grid-2">
+        <div class="panel">
+          <h2>请求链路</h2>
+          <pre class="arch">浏览器
+  ├── /static/*.js   ECharts 渲染
+  ├── /api/&lt;module&gt;   JSON 数据
+  └── /api/agent/chat 多轮工具调用
+          ↓
+    analysis/*.py   纯计算 · lru_cache
+          ↓
+    data/*.csv · *.xlsx</pre>
+        </div>
+        <div class="panel">
+          <h2>技术栈</h2>
+          <div class="chips">
+            <span class="chip"><b>FastAPI</b> 服务端渲染 + JSON API</span>
+            <span class="chip"><b>Pandas / NumPy</b> 清洗与聚合</span>
+            <span class="chip"><b>Scikit-learn</b> 风控模型</span>
+            <span class="chip"><b>VADER</b> 英文情感分析</span>
+            <span class="chip"><b>ECharts 5</b> 交互图表</span>
+            <span class="chip"><b>DeepSeek</b> Agent 工具编排</span>
+          </div>
+          <p class="hint">没有前端框架：静态资源 + fetch + ECharts，部署简单，首屏不依赖构建工具。未配置 DEEPSEEK_KEY 时，Agent 自动降级为规则编排，仍然调用真实分析层。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  {_footer()}
+</body></html>"""
+
+
+# ===== 模块页 =====
+def _module_page(slug: str):
+    m = MODULE_MAP[slug]
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head>
+  {_head(m['title'])}
+</head><body>
+  {_topbar(slug)}
+  <main class="container" id="app">
+    <div class="loading"><span class="spinner"></span>正在加载 {m['title']} 分析结果…</div>
+  </main>
+  {_footer()}
+  <script src="/static/echarts.min.js"></script>
+  <script src="/static/common.js"></script>
+  <script src="/static/{slug}.js"></script>
+</body></html>"""
+
+
 @app.get("/module/food", response_class=HTMLResponse)
-def module_food():
-    p = df_food.groupby('菜系类型')['人均消费'].agg(['count','mean']).round(1)
-    top8 = p[p['count']>=30].sort_values('mean',ascending=False).head(8)
-    fig,(ax1,ax2)=plt.subplots(1,2,figsize=(12,5))
-    ax1.barh(top8.index[::-1],top8['mean'][::-1],color='#C44E52')
-    ax1.set_title('人均消费最高菜系 TOP8');ax1.set_xlabel('人均消费（元）')
-    dist=df_food.groupby('county')['店铺id'].count().sort_values(ascending=False).head(6)
-    ax2.pie(dist.values,labels=dist.index,autopct='%1.1f%%',startangle=90,colors=plt.cm.Blues([.3,.4,.5,.6,.7,.8]))
-    ax2.set_title('各区店铺占比');plt.tight_layout()
-    chart=fig_to_html(fig)
+def page_food():
+    return _module_page("food")
 
-    fig2,(ax3,ax4)=plt.subplots(1,2,figsize=(12,5))
-    dfp=df_food[(df_food['人均消费']>0)&(df_food['人均消费']<=200)]
-    ax3.hist(dfp['人均消费'],bins=40,color='#2b5c9e',edgecolor='white')
-    ax3.set_title('人均消费分布（0-200元）');ax3.set_xlabel('人均消费（元）');ax3.set_ylabel('店铺数')
-    med=int(df_food['人均消费'].median())
-    ax3.axvline(x=med,color='red',linestyle='--',label=f'中位数 ¥{med}');ax3.legend()
-    ds=df_food.groupby('county').agg({'店铺id':'count','人均消费':'mean'}).round(1)
-    ds.columns=['店铺数','人均消费均值']
-    td=ds.sort_values('人均消费均值',ascending=False).head(8)
-    ax4.barh(td.index[::-1],td['人均消费均值'][::-1],color='#DD8452')
-    ax4.set_title('各区人均消费 TOP8');ax4.set_xlabel('人均消费均值（元）')
-    plt.tight_layout();chart2=fig_to_html(fig2)
 
-    avg_p=int(df_food['人均消费'].mean());med_p=int(df_food['人均消费'].median())
-    tc=df_food['菜系类型'].value_counts().index[0];tcn=df_food['菜系类型'].value_counts().values[0]
-    md=df_food.groupby('county')['店铺id'].count().idxmax()
-    ct=df_food.groupby('菜系类型').agg({'店铺id':'count','人均消费':'mean','评分':'mean'}).round(1)
-    ct.columns=['店铺数','人均消费','评分']
-    ctop=ct[ct['店铺数']>=50].sort_values('人均消费',ascending=False).head(10)
-    tr="".join(f"<tr><td>{i}</td><td>{r['店铺数']}</td><td>{r['人均消费']}</td><td>{r['评分']}</td></tr>" for i,r in ctop.iterrows())
-    dr="".join(f"<tr><td>{i}</td><td>{r['店铺数']}</td><td>{r['人均消费均值']}</td></tr>" for i,r in td[::-1].iterrows())
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>北京餐饮分析</title><style>{COMMON_CSS}</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<h1>🍽️ 北京餐饮行业分析</h1><a class="back" href="/">← 返回首页</a>
-<div class="metrics">
-<div class="metric"><div class="num">{len(df_food):,}</div><div class="label">店铺总量</div></div>
-<div class="metric"><div class="num">¥{avg_p}</div><div class="label">人均消费均值</div></div>
-<div class="metric"><div class="num">¥{med_p}</div><div class="label">人均消费中位数</div></div>
-<div class="metric"><div class="num">{tc}</div><div class="label">最大品类（{tcn}家）</div></div>
-</div>
-{chart}{chart2}
-<div class="insight"><b>📌 核心洞察：</b>北京餐饮以<strong>{tc}</strong>为主力品类，{md}店铺最密集。人均消费中位数仅 ¥{med_p}，75% 的店人均不到 88 元——市场以<strong>低价高频消费</strong>为主。高端餐饮集中在少数菜系和商圈。</div>
-<div class="flex2">
-<div><h2>菜系统计 TOP10</h2><table><tr><th>菜系</th><th>店铺数</th><th>人均消费</th><th>评分</th></tr>{tr}</table></div>
-<div><h2>各区消费排名 TOP8</h2><table><tr><th>区域</th><th>店铺数</th><th>人均消费</th></tr>{dr}</table></div>
-</div></body></html>"""
-
-# ===== 模块2：游戏评论 =====
 @app.get("/module/game", response_class=HTMLResponse)
-def module_game():
-    sent=df_game['sentiment'].value_counts()
-    ps=df_game.groupby('Platform')['Rating'].agg(['mean','count','std']).round(2)
-    fig,(ax1,ax2)=plt.subplots(1,2,figsize=(12,5))
-    ax1.pie(sent.values,labels=sent.index,autopct='%1.1f%%',startangle=90,colors=['#55A868','#999','#C44E52'])
-    ax1.set_title('评论情感分布')
-    ax2.bar(ps.index,ps['mean'],color=['#2b5c9e','#55A868','#DD8452'])
-    ax2.set_title('各平台平均评分');ax2.set_ylabel('Rating (0-10)')
-    plt.tight_layout();chart=fig_to_html(fig)
+def page_game():
+    return _module_page("game")
 
-    fig2,(ax3,ax4)=plt.subplots(1,2,figsize=(12,5))
-    ax3.hist(df_game['Rating'],bins=11,color='#2b5c9e',edgecolor='white')
-    ax3.set_title('评分分布');ax3.set_xlabel('Rating (0-10)');ax3.set_ylabel('评论数')
-    ax3.axvline(x=df_game['Rating'].mean(),color='red',linestyle='--',label=f"均值 {df_game['Rating'].mean():.1f}");ax3.legend()
-    ed={(df_game['Rating']>=9).mean()*100,(df_game['Rating']>=4).mean()*100}
-    eh=(df_game['Rating']>=9).mean()*100;em=((df_game['Rating']>=4)&(df_game['Rating']<=8)).mean()*100;el=(df_game['Rating']<=1).mean()*100
-    ax4.bar(['极端好评\n(9-10分)','中间评分\n(4-8分)','极端差评\n(0-1分)'],[eh,em,el],color=['#55A868','#999','#C44E52'])
-    ax4.set_title('评分两极分化');ax4.set_ylabel('占比 (%)')
-    for i,(l,v) in enumerate([('极端好评',eh),('中间',em),('极端差评',el)]):ax4.text(i,v+1,f'{v:.1f}%',ha='center',fontweight='bold')
-    plt.tight_layout();chart2=fig_to_html(fig2)
 
-    avg_r=df_game['Rating'].mean();pos_pct=(df_game['sentiment']=='好评').mean()*100;neg_pct=(df_game['sentiment']=='差评').mean()*100
-    best_p=ps['mean'].idxmax()
-    tr="".join(f"<tr><td>{i}</td><td>{r['mean']}</td><td>{r['count']}</td><td>{r['std']}</td></tr>" for i,r in ps.iterrows())
-
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>游戏评论分析</title><style>{COMMON_CSS}</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<h1>🎮 游戏评论情感分析</h1><a class="back" href="/">← 返回首页</a>
-<div class="metrics">
-<div class="metric"><div class="num">{len(df_game):,}</div><div class="label">评论总量</div></div>
-<div class="metric"><div class="num">{avg_r:.1f}</div><div class="label">平均评分</div></div>
-<div class="metric"><div class="num">{pos_pct:.0f}%</div><div class="label">好评率</div></div>
-<div class="metric"><div class="num">{best_p}</div><div class="label">最佳平台</div></div>
-</div>
-{chart}{chart2}
-<div class="insight"><b>📌 核心洞察：</b>玩家评论呈<strong>两极分化</strong>——满分和零分远多于中间评分。{best_p} 平台评分最高，PS5 评论最多但评分偏低。好评率仅 {pos_pct:.0f}%，游戏口碑维护压力大。</div>
-<h2>各平台数据详情</h2><table><tr><th>平台</th><th>平均评分</th><th>评论数</th><th>标准差</th></tr>{tr}</table>
-<p style="color:#999;font-size:12px">数据来源：Metacritic 真实游戏评论 · {len(df_game):,} 条</p></body></html>"""
-
-# ===== 模块3：用户留存 =====
 @app.get("/module/retention", response_class=HTMLResponse)
-def module_retention():
-    ret=df_retention.groupby('week').apply(lambda x: x['retained'].sum()/df_retention.groupby('week')['new_users'].sum().sum()*100).round(1)
-    fig,(ax1,ax2)=plt.subplots(1,2,figsize=(12,5))
-    ax1.plot(ret.index,ret.values,'o-',color='#2b5c9e',linewidth=2.5,markersize=10)
-    ax1.set_title('每周留存曲线');ax1.set_xlabel('周次');ax1.set_ylabel('留存率 (%)');ax1.grid(alpha=.3)
-    for x,y in zip(ret.index,ret.values):ax1.text(x,y+2,f'{y:.1f}%',ha='center',fontsize=11,fontweight='bold')
-    heat=df_retention.groupby('week')['retained'].sum()
-    ax2.bar(heat.index,heat.values,color='#DD8452')
-    ax2.set_title('每周回访人数');ax2.set_xlabel('周次');ax2.set_ylabel('人数')
-    plt.tight_layout();chart=fig_to_html(fig)
+def page_retention():
+    return _module_page("retention")
 
-    d1=100-ret.values[0] if len(ret)>0 else 0;d4=ret.values[3] if len(ret)>3 else 0
-    w1_ret=ret.values[0] if len(ret)>0 else 0;w4_ret=ret.values[3] if len(ret)>3 else 0
-    fig2,(ax3,ax4)=plt.subplots(1,2,figsize=(12,5))
-    weeks_range=range(1,6)
-    ret_values=[100]
-    for i in range(1,5):
-        if i-1<len(ret):ret_values.append(ret.values[i-1])
-    ax3.fill_between(weeks_range,ret_values,alpha=.3,color='#2b5c9e')
-    ax3.plot(weeks_range,ret_values,'o-',color='#2b5c9e',linewidth=2.5,markersize=10)
-    ax3.set_title('留存趋势');ax3.set_xlabel('注册后第几周');ax3.set_ylabel('留存率 (%)');ax3.grid(alpha=.3)
-    ax4.bar(['首周流失率','第4周留存率'],[d1,d4],color=['#C44E52','#55A868'])
-    ax4.set_title('关键指标');ax4.set_ylabel('%')
-    plt.tight_layout();chart2=fig_to_html(fig2)
 
-    tr="".join(f"<tr><td>第{w}周</td><td>{v:.1f}%</td></tr>" for w,v in zip(ret.index,ret.values))
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>用户留存分析</title><style>{COMMON_CSS}</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<h1>📈 用户留存分析</h1><a class="back" href="/">← 返回首页</a>
-<div class="metrics">
-<div class="metric"><div class="num">{df_retention['new_users'].sum():,}</div><div class="label">总注册用户</div></div>
-<div class="metric"><div class="num">{w1_ret:.0f}%</div><div class="label">首周留存率</div></div>
-<div class="metric"><div class="num">{w4_ret:.0f}%</div><div class="label">第4周留存率</div></div>
-<div class="metric"><div class="num">{d1:.0f}%</div><div class="label">首周流失率</div></div>
-</div>
-{chart}{chart2}
-<div class="insight"><b>📌 核心洞察：</b>首周流失约 <strong>{d1:.0f}%</strong>——新用户激活是第一优先级。一个月后仅 <strong>{w4_ret:.0f}%</strong> 留存，符合互联网产品"先陡后平"的留存规律。建议首周加新手引导和 Push 召回。</div>
-<h2>留存率详情</h2><table><tr><th>周次</th><th>留存率</th></tr>{tr}</table>
-<p style="color:#999;font-size:12px">数据来源：模拟 App 注册数据 · {df_retention['new_users'].sum():,} 用户</p></body></html>"""
-
-# ===== 模块4：贷款违约预测 =====
 @app.get("/module/loan", response_class=HTMLResponse)
-def module_loan():
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.model_selection import train_test_split
+def page_loan():
+    return _module_page("loan")
 
-    np.random.seed(42);n=5000
-    X=pd.DataFrame({'credit_score':np.clip(np.random.normal(650,80,n).astype(int),300,850),'debt_ratio':np.random.uniform(0,.7,n).round(2),'income':np.clip(np.random.lognormal(8.8,.5,n).astype(int),30000,2000000),'has_house':np.random.choice([0,1],n,p=[.5,.5]),'has_car':np.random.choice([0,1],n,p=[.4,.6]),'age':np.clip(np.random.normal(38,10,n).astype(int),22,65),'emp_years':np.clip(np.random.exponential(5,n).astype(int),0,40)})
-    # 违约风险主要由非线性交互驱动（高负债×低信用等组合），线性特征只给弱信号
-    risk=-1.5+3.0*((X['debt_ratio']>0.5)&(X['credit_score']<600)).astype(int)+2.5*((X['debt_ratio']>0.35)&(X['income']<90000)).astype(int)+1.5*((X['has_house']==0)&(X['has_car']==0)&(X['debt_ratio']>0.3)).astype(int)-0.01*X['credit_score']/10-0.2*X['has_house']-0.15*X['has_car']
-    log_odds=risk+np.random.normal(0,1.2,n)
-    y=(1/(1+np.exp(-log_odds))>np.percentile(1/(1+np.exp(-log_odds)),85)).astype(int)
-    X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=.2,random_state=42)
-    rf=RandomForestClassifier(n_estimators=100,max_depth=6,random_state=42);rf.fit(X_train,y_train)
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-    rf_auc=roc_auc_score(y_test,rf.predict_proba(X_test)[:,1])
-    lr=LogisticRegression(max_iter=1000);lr.fit(X_train,y_train)
-    lr_auc=roc_auc_score(y_test,lr.predict_proba(X_test)[:,1])
 
-    imp=pd.DataFrame({'特征':X.columns,'重要性':rf.feature_importances_}).sort_values('重要性',ascending=False)
-    fig,(ax1,ax2)=plt.subplots(1,2,figsize=(12,5))
-    ax1.barh(imp['特征'][::-1],imp['重要性'][::-1],color='#2b5c9e')
-    ax1.set_title('特征重要性排名');ax1.set_xlabel('重要性权重')
-    for i,v in enumerate(imp['重要性'][::-1]):ax1.text(v+.005,i,f'{v:.3f}',va='center')
-    ax2.bar(['逻辑回归','随机森林'],[lr_auc,rf_auc],color=['#999','#C44E52'])
-    ax2.set_ylim(0,1);ax2.set_ylabel('AUC')
-    for i,v in enumerate([lr_auc,rf_auc]):ax2.text(i,v+.02,f'{v:.3f}',ha='center',fontweight='bold')
-    ax2.set_title('模型 AUC 对比')
-    plt.tight_layout();chart=fig_to_html(fig)
+@app.get("/module/rental", response_class=HTMLResponse)
+def page_rental():
+    return _module_page("rental")
 
-    fig2,(ax3,ax4)=plt.subplots(1,2,figsize=(12,5))
-    def_rate=y.mean()*100
-    ax3.bar(['正常还款','违约'],[100-def_rate,def_rate],color=['#55A868','#C44E52'])
-    ax3.set_title(f'违约率 {def_rate:.0f}%');ax3.set_ylabel('%')
-    ax3.text(0,50,f'{100-def_rate:.0f}%',ha='center',fontsize=18,fontweight='bold')
-    ax3.text(1,def_rate+1,f'{def_rate:.0f}%',ha='center',fontsize=18,fontweight='bold')
 
-    top_features=imp.head(3)['特征'].tolist()
-    top_weights=imp.head(3)['重要性'].tolist()
-    ax4.bar(imp['特征'][::-1],imp['重要性'][::-1],color=['#C44E52' if i<2 else '#2b5c9e' for i in range(len(imp))])
-    ax4.set_title('特征重要性（红色=前2名主导因子）');ax4.set_xlabel('特征');ax4.set_ylabel('重要性')
-    ax4.tick_params(axis='x',rotation=30)
-    plt.tight_layout();chart2=fig_to_html(fig2)
+@app.get("/module/jobs", response_class=HTMLResponse)
+def page_jobs():
+    return _module_page("jobs")
 
-    tr="".join(f"<tr><td>{r['特征']}</td><td>{r['重要性']:.3f}</td></tr>" for _,r in imp.iterrows())
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>贷款违约预测</title><style>{COMMON_CSS}</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<h1>🏦 贷款违约预测 — 机器学习风控模型</h1><a class="back" href="/">← 返回首页</a>
-<div class="metrics">
-<div class="metric"><div class="num">{n:,}</div><div class="label">模拟信贷样本</div></div>
-<div class="metric"><div class="num">{rf_auc:.3f}</div><div class="label">随机森林 AUC</div></div>
-<div class="metric"><div class="num">{def_rate:.0f}%</div><div class="label">违约率</div></div>
-<div class="metric"><div class="num">{imp.iloc[0]['特征']}</div><div class="label">最强预测因子</div></div>
-</div>
-{chart}{chart2}
-<div class="insight"><b>📌 核心洞察：</b>随机森林 AUC 达 <strong>{rf_auc:.3f}</strong>，比逻辑回归（{lr_auc:.3f}）高约 {(rf_auc-lr_auc)*100:.0f} 个百分点——因为违约风险存在「高负债×低信用」的非线性交互，树模型能捕捉、线性模型不能，结论符合真实风控业务。</div>
-<h2>特征重要性排名</h2><table><tr><th>特征</th><th>重要性</th></tr>{tr}</table>
-<p style="color:#999;font-size:12px">数据来源：模拟银行信贷数据 · {n:,} 条 · sklearn 随机森林</p></body></html>"""
 
-# ===== 模块5：Agent 交互页 =====
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
+# ===== Agent =====
+MODULE_LABELS = {
+    "food": "北京餐饮",
+    "game": "游戏评论",
+    "retention": "用户留存",
+    "loan": "贷款违约",
+    "rental": "北京租房",
+    "jobs": "数据岗招聘",
+}
+
+FOCUS_ALIASES = {
+    "价格": "price", "人均": "price", "消费": "price", "贵": "price",
+    "菜系": "cuisine", "品类": "cuisine",
+    "评分": "rating", "评价": "rating",
+    "区域": "district", "商圈": "district", "各区": "district", "哪个区": "district",
+    "米其林": "michelin", "夜宵": "late_night", "营业": "late_night",
+    "推荐": "recommend", "哪家": "recommend", "好吃": "recommend",
+    "吃什么": "recommend", "吃哪": "recommend", "餐厅推荐": "recommend",
+    "情感": "sentiment", "主题": "themes", "平台": "platforms",
+    "关键词": "keywords", "极化": "polarization",
+    "渠道": "channels", "设备": "devices", "队列": "cohorts", "流失": "hazard",
+    "阈值": "thresholds", "校准": "calibration", "重要性": "importance",
+    "分群": "segments", "指标": "metrics", "ks": "metrics",
+    "户型": "rent_types", "面积": "area", "配套": "amenities",
+    "地铁": "amenities", "装修": "attributes", "楼层": "attributes",
+    "城市": "cities", "岗位": "families", "职能": "families",
+    "方向": "families", "岗位族": "families",
+    "经验": "experience", "学历": "education", "公司": "company",
+    "规模": "company", "趋势": "trend", "整租": "rent_types", "合租": "rent_types",
+}
+
+MODULE_KEYS = {
+    "food": ["餐饮", "菜系", "餐厅", "美食", "人均消费", "米其林", "夜宵", "吃饭", "餐馆", "饭馆"],
+    "game": ["游戏", "评论", "情感", "metacritic", "评分"],
+    "retention": ["留存", "流失", "队列", "注册用户", "渠道", "拉新"],
+    "loan": ["贷款", "违约", "风控", "信贷", "坏账", "auc", "ks"],
+    "rental": ["租房", "租金", "房源", "整租", "合租", "房东"],
+    "jobs": ["招聘", "岗位", "薪资", "求职", "就业", "数据岗", "月薪"],
+}
+# 模块专属词优先，避免「餐饮评分」同时命中 game 的「评分」
+PRIMARY_KEYS = {
+    "food": ["餐饮", "餐厅", "菜系", "美食", "米其林", "夜宵", "吃饭", "餐馆", "饭馆"],
+    "game": ["游戏", "metacritic"],
+    "retention": ["留存", "流失", "队列", "注册用户", "拉新"],
+    "loan": ["贷款", "违约", "风控", "信贷", "坏账", "auc", "ks"],
+    "rental": ["租房", "租金", "房源", "整租", "合租", "房东"],
+    "jobs": ["招聘", "求职", "就业", "数据岗", "月薪", "薪资"],
+}
+
+AGENT_SYSTEM = """你是「全栈数据分析平台」的分析 Agent，服务对象是求职者和业务同学。
+你可以调用 6 个分析模块的工具，每次调用返回该模块的完整统计结果。
+
+工具列表（module + focus）：
+- food：北京餐饮。focus = overview / price / cuisine / rating / district / michelin / late_night / recommend
+  recommend 支持可选参数：district（如「丰台区」）、cuisine（如「火锅」）、min_price、max_price（元）
+- game：游戏评论。focus = overview / sentiment / themes / platforms / keywords / polarization
+- retention：用户留存。focus = overview / channels / devices / cohorts / hazard
+- loan：贷款违约。focus = overview / metrics / thresholds / calibration / importance / segments
+- rental：北京租房。focus = overview / districts / area / amenities / rent_types / attributes / trend
+- jobs：数据岗招聘。focus = overview / cities / families / experience / education / company
+
+规则：
+1. 一次只调用一个工具。问题涉及多个模块或多个维度时，分多次调用。
+2. 最多调用 3 次；信息足够后立即给最终回答。
+3. 回答必须引用工具返回的具体数字，不要编造。
+4. 如果用户在做比较，先分别取数，再给结论。
+5. 用户问「推荐一家 / 吃什么 / 哪家好吃」时，必须调用 food + recommend，
+   给出至少 3 家具体店名，并带区域、菜系、人均、评分、评论数；
+   不要只回答「北京餐饮」或模块概览。
+6. 调用 food + recommend 时，把用户提到的区域、菜系、预算放进 params，
+   例如「丰台区 100 以内」→ {"district":"丰台区","max_price":100}。
+   工具返回什么店就推荐什么店，不要自己编造店名。
+7. 只回答当前问题。历史对话只用于理解「它 / 这个 / 再按城市拆一下」这类指代；
+   不要把历史里问过的其他模块带进本轮回答，也不要无故调用其他模块的工具。
+8. 用中文回答，简洁，先结论后依据。
+
+只输出 JSON，格式示例：
+{"action":"call","module":"food","focus":"price"}
+{"action":"call","module":"food","focus":"recommend","params":{"district":"丰台区","max_price":100}}
+{"action":"final","reply":"最终回答"}
+"""
+
+
+def _json_text(obj, limit=3200):
+    s = json.dumps(obj, ensure_ascii=False, default=str, separators=(",", ":"))
+    return s if len(s) <= limit else s[:limit] + "...(截断)"
+
+
+def _normalize_focus(focus):
+    if not focus:
+        return "overview"
+    f = str(focus).strip().lower()
+    return FOCUS_ALIASES.get(f, f)
+
+
+def _agent_tool(module, focus="overview", params=None):
+    """返回给 LLM 的紧凑工具结果（字符串）。"""
+    module = str(module or "").strip().lower()
+    focus = _normalize_focus(focus)
+
+    if module == "food":
+        d = get_food_analysis()
+        if focus == "price":
+            payload = {"overview": d["overview"], "price_bands": d["price_bands"],
+                       "price_distribution": d["price_distribution"],
+                       "insights": d["insights"][:4]}
+        elif focus == "cuisine":
+            payload = {"overview": d["overview"], "cuisine_table": d["cuisine_table"][:12],
+                       "insights": d["insights"][:4]}
+        elif focus == "rating":
+            payload = {"overview": d["overview"], "rating": d["rating"],
+                       "review_concentration": d["review_concentration"],
+                       "insights": d["insights"][:4]}
+        elif focus == "district":
+            payload = {"overview": d["overview"], "districts": d["districts"],
+                       "business_areas": d["business_areas"][:12],
+                       "insights": d["insights"][:4]}
+        elif focus == "michelin":
+            payload = {"michelin": d["michelin"], "insights": d["insights"][:4]}
+        elif focus == "late_night":
+            payload = {"late_night": d["late_night"], "insights": d["insights"][:4]}
+        elif focus == "recommend":
+            p = params if isinstance(params, dict) else {}
+            try:
+                rec = recommend_food(
+                    district=p.get("district"),
+                    cuisine=p.get("cuisine"),
+                    min_price=p.get("min_price"),
+                    max_price=p.get("max_price"),
+                    limit=6,
+                )
+            except (TypeError, ValueError):
+                rec = recommend_food(limit=6)
+            payload = {"recommendations": rec, "data_notes": d["data_notes"][:2]}
+        else:
+            payload = {"overview": d["overview"], "insights": d["insights"][:4]}
+        return _json_text(payload)
+
+    if module == "game":
+        d = get_game_analysis()
+        if focus == "sentiment":
+            payload = {"overview": d["overview"], "sentiment_vs_rating": d["sentiment_vs_rating"],
+                       "insights": d["insights"][:4]}
+        elif focus == "themes":
+            payload = {"themes": d["themes"], "insights": d["insights"][:4]}
+        elif focus == "platforms":
+            payload = {"platforms": d["platforms"], "polarization": d["polarization"],
+                       "insights": d["insights"][:4]}
+        elif focus == "keywords":
+            payload = {"keywords": d["keywords"],
+                       "insights": d["insights"][:4]}
+        else:
+            payload = {"overview": d["overview"], "rating_distribution": d["rating_distribution"],
+                       "insights": d["insights"][:4]}
+        return _json_text(payload)
+
+    if module == "retention":
+        d = get_retention_analysis()
+        if focus == "channels":
+            payload = {"channels": d["channels"], "insights": d["insights"][:4]}
+        elif focus == "devices":
+            payload = {"devices": d["devices"], "insights": d["insights"][:4]}
+        elif focus == "cohorts":
+            payload = {"overview": d["overview"],
+                       "cohorts_first": d["cohorts"][:6],
+                       "cohorts_last": d["cohorts"][-6:],
+                       "cohort_trend": d["cohort_trend"][::4],
+                       "insights": d["insights"][:4]}
+        elif focus == "hazard":
+            payload = {"hazard": d["hazard"], "average_curve": d["average_curve"],
+                       "insights": d["insights"][:4]}
+        else:
+            payload = {"overview": d["overview"], "average_curve": d["average_curve"],
+                       "insights": d["insights"][:4]}
+        return _json_text(payload)
+
+    if module == "loan":
+        d = get_loan_analysis()
+        if focus == "thresholds":
+            payload = {"overview": d["overview"], "metrics": d["metrics"],
+                       "thresholds": d["thresholds"], "insights": d["insights"][:5]}
+        elif focus == "calibration":
+            payload = {"calibration": d["calibration"], "insights": d["insights"][:5]}
+        elif focus == "importance":
+            payload = {"feature_importance": d["feature_importance"], "insights": d["insights"][:4]}
+        elif focus == "segments":
+            payload = {"segments": d["segments"], "insights": d["insights"][:4]}
+        elif focus == "metrics":
+            payload = {"overview": d["overview"], "metrics": d["metrics"],
+                       "cv_scores": d["cv_scores"], "insights": d["insights"][:5]}
+        else:
+            payload = {"overview": d["overview"], "metrics": d["metrics"],
+                       "insights": d["insights"][:5]}
+        return _json_text(payload)
+
+    if module == "rental":
+        d = get_rental_analysis()
+        if focus == "districts":
+            payload = {"overview": d["overview"], "districts": d["districts"],
+                       "district_by_type": d["district_by_type"],
+                       "insights": d["insights"][:5]}
+        elif focus == "area":
+            payload = {"area_bands": d["area_bands"], "area_gap": d["area_gap"],
+                       "rent_area_corr": d["rent_area_corr"],
+                       "insights": d["insights"][:5]}
+        elif focus == "amenities":
+            payload = {"amenities": d["amenities"], "subway_distance": d["subway_distance"],
+                       "insights": d["insights"][:4]}
+        elif focus == "rent_types":
+            payload = {"rent_types": d["rent_types"], "insights": d["insights"][:4]}
+        elif focus == "attributes":
+            payload = {"attributes": d["attributes"],
+                       "attribute_spread_pct": d["attribute_spread_pct"],
+                       "insights": d["insights"][:4]}
+        elif focus == "trend":
+            payload = {"trend": d["trend"], "insights": d["insights"][:4]}
+        else:
+            payload = {"overview": d["overview"], "rent_types": d["rent_types"],
+                       "insights": d["insights"][:5]}
+        return _json_text(payload)
+
+    if module == "jobs":
+        d = get_jobs_analysis()
+        if focus == "cities":
+            payload = {"overview": d["overview"], "cities": d["cities"],
+                       "city_controlled": d["city_controlled"],
+                       "insights": d["insights"][:6]}
+        elif focus == "families":
+            payload = {"families": d["families"], "insights": d["insights"][:5]}
+        elif focus == "experience":
+            payload = {"experience": d["experience"], "insights": d["insights"][:5]}
+        elif focus == "education":
+            payload = {"education": d["education"], "insights": d["insights"][:4]}
+        elif focus == "company":
+            payload = {"company_type": d["company_type"],
+                       "company_size": d["company_size"],
+                       "insights": d["insights"][:4]}
+        else:
+            payload = {"overview": d["overview"], "families": d["families"],
+                       "insights": d["insights"][:5]}
+        return _json_text(payload)
+
+    return _json_text({"error": f"未知模块 {module}，可用：{list(MODULE_LABELS)}"})
+
+
+def _call_llm(messages, temperature=0, timeout=45):
+    if not DEEPSEEK_KEY:
+        return None
+    import time
+    import requests as req
+    for attempt in range(2):
+        try:
+            r = req.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": messages,
+                      "temperature": temperature},
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(0.8)  # 网络抖动 / 429 时重试一次
+    return None
+
+
+def _parse_decision(text):
+    if not text:
+        return {}
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.startswith("json"):
+            s = s[4:]
+    try:
+        return json.loads(s)
+    except Exception:
+        i, j = s.find("{"), s.rfind("}")
+        if i >= 0 and j > i:
+            try:
+                return json.loads(s[i:j + 1])
+            except Exception:
+                pass
+    # 模型偶尔直接输出自然语言：当作 final 回答，而不是丢掉后走通用兜底
+    if s.startswith("{") or s.startswith("```"):
+        return {}
+    return {"action": "final", "reply": s}
+
+
+def _match_modules(text, mapping):
+    text = str(text).lower()
+    return [m for m, keys in mapping.items()
+            if any(str(k).lower() in text for k in keys)]
+
+
+def _infer_foci(module, text):
+    text = str(text).lower()
+    foci = []
+    for word, focus in FOCUS_ALIASES.items():
+        if word.lower() in text and focus not in foci:
+            foci.append(focus)
+    # 同一别名在不同模块下指向不同的工具名
+    if module == "rental" and "district" in foci:
+        foci[foci.index("district")] = "districts"
+    return foci
+
+
+def _infer_focus(module, text):
+    foci = _infer_foci(module, text)
+    return foci[0] if foci else "overview"
+
+
+def _module_data(module):
+    return {
+        "food": get_food_analysis,
+        "game": get_game_analysis,
+        "retention": get_retention_analysis,
+        "loan": get_loan_analysis,
+        "rental": get_rental_analysis,
+        "jobs": get_jobs_analysis,
+    }[module]()
+
+
+def _fmt_money(v):
+    try:
+        return f"¥{float(v):,.0f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _fmt_pct(v):
+    try:
+        return f"{float(v):.1f}%"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _weighted_median(pairs):
+    total = sum(c for _, c in pairs)
+    if not total:
+        return None
+    seen = 0
+    for value, count in sorted(pairs):
+        seen += count
+        if seen >= total / 2:
+            return value
+    return None
+
+
+def _food_answer(foci):
+    d = get_food_analysis()
+    o = d["overview"]
+    lines, tools = [], []
+
+    if "district" in foci:
+        by_count = sorted(d["districts"], key=lambda x: -x["stores"])
+        by_price = sorted(d["districts"], key=lambda x: -x["median_price"])
+        cheap = sorted(d["districts"], key=lambda x: x["median_price"])
+        lines.append("店铺最多的区：" + "、".join(
+            f"{x['name']} {x['stores']:,} 家" for x in by_count[:3]))
+        lines.append(
+            f"人均中位最高 {by_price[0]['name']} {_fmt_money(by_price[0]['median_price'])}，"
+            f"最低 {cheap[0]['name']} {_fmt_money(cheap[0]['median_price'])}，"
+            f"相差 {by_price[0]['median_price'] / max(cheap[0]['median_price'], 1):.1f} 倍")
+        tools.append("food.district")
+
+    if "cuisine" in foci:
+        cuisines = [x for x in d["cuisine_table"] if x["name"] not in ("未标注", "其他")]
+        by_count = sorted(cuisines, key=lambda x: -x["stores"])
+        expensive = sorted([x for x in cuisines if x["stores"] >= 50],
+                           key=lambda x: -x["median_price"])
+        lines.append("店铺最多的菜系：" + "、".join(
+            f"{x['name']} {x['stores']:,} 家" for x in by_count[:3]))
+        if expensive:
+            lines.append("人均中位最高（限 ≥50 家）：" + "、".join(
+                f"{x['name']} {_fmt_money(x['median_price'])}" for x in expensive[:3]))
+        tools.append("food.cuisine")
+
+    if "price" in foci:
+        lines.append(
+            f"价格有效样本 {o['stores_with_price']:,}/{o['stores']:,}"
+            f"（覆盖 {_fmt_pct(o['price_coverage_pct'])}），中位 {_fmt_money(o['price_median'])}、"
+            f"均值 {_fmt_money(o['price_mean'])}、P90 {_fmt_money(o['price_p90'])}；"
+            f"另 {o['stores'] - o['stores_with_price']:,} 家 0 元按缺失处理")
+        tools.append("food.price")
+
+    if "rating" in foci:
+        rating = d["rating"]
+        med = _weighted_median([(x["score"], x["count"]) for x in rating["distribution"]])
+        lines.append(
+            f"有评分店铺 {rating['rated_stores']:,} 家（覆盖 {_fmt_pct(o['rating_coverage_pct'])}）；"
+            f"评分中位 {med}/5，价格与评分的相关系数仅 {rating['price_rating_corr']}")
+        tools.append("food.rating")
+
+    if "michelin" in foci:
+        lines.append("米其林分层：" + "、".join(
+            f"{x['tier']} {x['stores']} 家（中位 {_fmt_money(x['median_price'])}）"
+            for x in d["michelin"]))
+        tools.append("food.michelin")
+
+    if "late_night" in foci:
+        late = d["late_night"]
+        lines.append(
+            f"营业时间可解析 {late['parsed_stores']:,} 家（{_fmt_pct(late['parsed_pct'])}），"
+            f"其中夜宵 {late['late_stores']:,} 家（{_fmt_pct(late['late_pct_of_parsed'])}）；"
+            "夜宵占比最高：" + "、".join(
+                f"{x['name']} {_fmt_pct(x['late_pct'])}" for x in late["top_districts"][:2]))
+        tools.append("food.late_night")
+
+    if "recommend" in foci:
+        rec = d["recommendations"]
+        picks = rec["top_rated"][:3]
+        lines.append(
+            "推荐候选（有评分且评论数 ≥ 50）：" + "；".join(
+                f"{x['name']}（{x['district']}·{x['cuisine']}，"
+                f"{_fmt_money(x['price'])}/人，{x['rating']}/5，{x['reviews']} 条评论）"
+                for x in picks
+            )
+        )
+        if rec["value"]:
+            v = rec["value"][0]
+            if v["name"] not in {x["name"] for x in picks}:
+                lines.append(
+                    f"性价比可选：{v['name']}（{v['district']}，"
+                    f"{_fmt_money(v['price'])}/人，{v['rating']}/5，{v['reviews']} 条评论）"
+                )
+        lines.append(
+            f"推荐池 {rec['eligible_stores']:,} 家；评分覆盖仅 39.2%，"
+            "这是「有评分且评论足够」的子样本，不是全量店铺排名"
+        )
+        tools.append("food.recommend")
+
+    return lines, tools
+
+
+def _game_answer(foci):
+    d = get_game_analysis()
+    o = d["overview"]
+    lines, tools = [], []
+
+    if "rating" in foci:
+        p = d["polarization"]
+        lines.append(
+            f"评分中位 {o['median_rating']:.1f}/10，均值 {o['avg_rating']:.2f}/10；"
+            f"极端评分（0–3 或 8–10）占 {_fmt_pct(p['extreme_pct'])}，"
+            f"中间分段仅 {_fmt_pct(p['middle_pct'])}")
+        tools.append("game.rating")
+
+    if "sentiment" in foci:
+        lines.append(
+            f"VADER 文本情感：正面 {_fmt_pct(o['positive_pct'])}、负面 {_fmt_pct(o['negative_pct'])}、"
+            f"中性 {_fmt_pct(o['neutral_pct'])}；与用户评分一致率 {_fmt_pct(o['agreement_pct'])}，"
+            f"相关系数 {o['text_rating_corr']}")
+        tools.append("game.sentiment")
+
+    if "platforms" in foci:
+        ps = d["platforms"]
+        pos = max(ps, key=lambda x: x["positive_pct"])
+        neg = max(ps, key=lambda x: x["negative_pct"])
+        pol = max(ps, key=lambda x: x["polarization_pct"])
+        lines.append(
+            f"文本正面率最高 {pos['name']} {_fmt_pct(pos['positive_pct'])}；"
+            f"负面率最高 {neg['name']} {_fmt_pct(neg['negative_pct'])}；"
+            f"极化最高 {pol['name']} {_fmt_pct(pol['polarization_pct'])}")
+        tools.append("game.platforms")
+
+    if "themes" in foci:
+        themes = d["themes"]
+        top = max(themes, key=lambda x: x["mention_pct"])
+        neg = max(themes, key=lambda x: x["negative_pct"])
+        lines.append(
+            f"提及最多：{top['label']} {_fmt_pct(top['mention_pct'])}；"
+            f"负面率最高：{neg['label']} {_fmt_pct(neg['negative_pct'])}")
+        tools.append("game.themes")
+
+    if "keywords" in foci:
+        lines.append("正面高频词：" + "、".join(
+            x["term"] for x in d["keywords"]["positive"][:5]))
+        lines.append("负面高频词：" + "、".join(
+            x["term"] for x in d["keywords"]["negative"][:5]))
+        tools.append("game.keywords")
+
+    if "polarization" in foci:
+        p = d["polarization"]
+        lines.append(
+            f"两极分化：极端评分占 {_fmt_pct(p['extreme_pct'])}；"
+            f"好评率（8–10）{_fmt_pct(p['top_box_pct'])}，"
+            f"差评率（0–3）{_fmt_pct(p['bottom_box_pct'])}")
+        tools.append("game.polarization")
+
+    return lines, tools
+
+
+def _retention_answer(foci):
+    d = get_retention_analysis()
+    o = d["overview"]
+    lines, tools = [], []
+
+    if "channels" in foci:
+        channels = sorted(d["channels"], key=lambda x: -x["values"][4])
+        lines.append("渠道 W4 留存：" + "、".join(
+            f"{x['name']} {_fmt_pct(x['values'][4])}（用户占 {_fmt_pct(x['share_pct'])}）"
+            for x in channels))
+        tools.append("retention.channels")
+
+    if "devices" in foci:
+        lines.append("设备 W4 留存：" + "、".join(
+            f"{x['name']} {_fmt_pct(x['values'][4])}" for x in d["devices"]))
+        tools.append("retention.devices")
+
+    if "hazard" in foci:
+        lines.append(
+            f"首周流失 {_fmt_pct(o['first_week_churn'])}；"
+            f"第 2 周条件流失 {_fmt_pct(d['hazard'][1]['churn_pct'])}，之后快速下降")
+        tools.append("retention.hazard")
+
+    if "cohorts" in foci:
+        lines.append(
+            f"{o['cohorts']} 个注册周队列；W4 留存从早期 {_fmt_pct(o['cohort_w4_early'])} "
+            f"升至近期 {_fmt_pct(o['cohort_w4_late'])}"
+            f"（+{o['cohort_w4_late'] - o['cohort_w4_early']:.1f}pp）")
+        tools.append("retention.cohorts")
+
+    if not lines:
+        lines, tools = d["insights"][:4], ["retention.overview"]
+    return lines, tools
+
+
+def _loan_answer(foci):
+    d = get_loan_analysis()
+    o, m = d["overview"], d["metrics"]
+    lines, tools = [], []
+
+    if "thresholds" in foci:
+        best = min(d["thresholds"], key=lambda x: abs(x["threshold"] - o["best_threshold"]))
+        mid = min(d["thresholds"], key=lambda x: abs(x["threshold"] - 0.5))
+        lines.append(
+            f"收益最优阈值 {best['threshold']:.2f}：通过率 {_fmt_pct(best['approval_pct'])}、"
+            f"坏账率 {_fmt_pct(best['bad_rate_pct'])}、违约召回 "
+            f"{_fmt_pct(best['default_recall_pct'])}、测试集总期望收益 "
+            f"{_fmt_money(best['expected_profit'])}")
+        lines.append(
+            f"对比默认 0.50：通过率 {_fmt_pct(mid['approval_pct'])}、"
+            f"坏账率 {_fmt_pct(mid['bad_rate_pct'])}、违约召回 "
+            f"{_fmt_pct(mid['default_recall_pct'])}、总收益 "
+            f"{_fmt_money(mid['expected_profit'])}——坏账率翻倍，收益被坏账吃掉")
+        tools.append("loan.thresholds")
+
+    if "metrics" in foci:
+        lines.append(
+            f"随机森林 AUC {o['auc_rf']:.3f}（逻辑回归 {o['auc_lr']:.3f}）、"
+            f"KS {o['ks']:.3f}、PR-AUC {m['pr_auc']:.3f}；默认阈值精确率 "
+            f"{_fmt_pct(m['precision'] * 100)}、召回率 {_fmt_pct(m['recall'] * 100)}")
+        tools.append("loan.metrics")
+
+    if "calibration" in foci:
+        lines.append("校准曲线 10 个分箱；高分段预测概率与实际违约率基本贴合，"
+                     "模型输出可以直接当概率使用")
+        tools.append("loan.calibration")
+
+    if "importance" in foci:
+        imp = sorted(d["feature_importance"],
+                     key=lambda x: -x["permutation_auc_drop"])[:3]
+        lines.append("置换重要性前三：" + "、".join(
+            f"{x['feature']}（AUC 下降 {x['permutation_auc_drop']:.3f}）" for x in imp))
+        tools.append("loan.importance")
+
+    if "segments" in foci:
+        seg = d["segments"]
+        high_credit = max(seg["credit"], key=lambda x: x["default_pct"])
+        high_debt = max(seg["debt"], key=lambda x: x["default_pct"])
+        lines.append(
+            f"违约率最高分群：信用分 {high_credit['band']} 为 "
+            f"{_fmt_pct(high_credit['default_pct'])}；负债率 {high_debt['band']} 为 "
+            f"{_fmt_pct(high_debt['default_pct'])}")
+        tools.append("loan.segments")
+
+    if not lines:
+        lines, tools = d["insights"][:4], ["loan.overview"]
+    return lines, tools
+
+
+def _rental_answer(foci):
+    d = get_rental_analysis()
+    lines, tools = [], []
+
+    if "rent_types" in foci:
+        lines.append("房型对比：" + "；".join(
+            f"{x['name']}中位 {_fmt_money(x['rent_median'])}、面积 {x['area_median']}㎡、"
+            f"单价 {_fmt_money(x['unit_median'])}/㎡（{x['count']:,} 套）"
+            for x in d["rent_types"]))
+        tools.append("rental.rent_types")
+
+    if "districts" in foci:
+        ds = sorted(d["districts"], key=lambda x: -x["rent_median"])
+        whole = sorted(d["district_by_type"].get("整租", []),
+                       key=lambda x: -x["rent_median"])
+        shared = sorted(d["district_by_type"].get("合租", []),
+                        key=lambda x: -x["rent_median"])
+        lines.append("整体租金中位最高：" + "、".join(
+            f"{x['district']} {_fmt_money(x['rent_median'])}" for x in ds[:3])
+            + f"；最低 {ds[-1]['district']} {_fmt_money(ds[-1]['rent_median'])}")
+        if whole and shared:
+            lines.append(
+                f"但分房型排序不同：整租最贵 {whole[0]['district']} "
+                f"{_fmt_money(whole[0]['rent_median'])}，合租最贵 {shared[0]['district']} "
+                f"{_fmt_money(shared[0]['rent_median'])}——混算会被房型结构污染")
+        tools.append("rental.districts")
+
+    if "area" in foci:
+        b, corr = d["area_bands"], d["rent_area_corr"]
+        lines.append(
+            f"面积 {b[0]['band']} 单价 {_fmt_money(b[0]['unit_median'])}/㎡ → "
+            f"{b[-1]['band']} {_fmt_money(b[-1]['unit_median'])}/㎡；"
+            f"同房型内租金与面积相关系数仅 {corr['整租']}（整租）/ "
+            f"{corr['合租']}（合租），主要是除法效应")
+        tools.append("rental.area")
+
+    if "amenities" in foci:
+        lines.append("配套与单价的差异：" + "、".join(
+            f"{x['label']} {x['diff_pct']:+.1f}%" for x in d["amenities"])
+            + "；都在 1% 以内，不能写成「地铁房溢价」")
+        tools.append("rental.amenities")
+
+    if "attributes" in foci:
+        s = d["attribute_spread_pct"]
+        lines.append(
+            f"属性组间单价差异：装修 {_fmt_pct(s['装修'])}、楼层 {_fmt_pct(s['楼层'])}、"
+            f"朝向 {_fmt_pct(s['朝向'])}，接近随机噪声")
+        tools.append("rental.attributes")
+
+    if "trend" in foci:
+        t = d["trend"]
+        change = (t[-1]["rent_median"] / t[0]["rent_median"] - 1) * 100
+        lines.append(
+            f"{t[0]['month']} 至 {t[-1]['month']} 租金中位 "
+            f"{_fmt_money(t[0]['rent_median'])} → {_fmt_money(t[-1]['rent_median'])}"
+            f"（{change:+.1f}%），24 个月整体平稳")
+        tools.append("rental.trend")
+
+    if not lines:
+        lines, tools = d["insights"][:4], ["rental.overview"]
+    return lines, tools
+
+
+def _jobs_answer(foci):
+    d = get_jobs_analysis()
+    o = d["overview"]
+    lines, tools = [], []
+
+    if "cities" in foci:
+        cities = sorted(d["cities"], key=lambda x: -x["count"])[:5]
+        lines.append("岗位最多的城市：" + "、".join(
+            f"{x['city']} {x['count']:,} 条" for x in cities[:3])
+            + f"，TOP3 合计占 {_fmt_pct(o['top3_city_share_pct'])}")
+        lines.append("月薪中位：" + "、".join(
+            f"{x['city']} {_fmt_money(x['monthly_median'])}" for x in cities[:3])
+            + "；城市差异里混有岗位结构，不能直接当同岗薪资差")
+        tools.append("jobs.cities")
+
+    if "families" in foci:
+        families = [x for x in d["families"] if x["family"] != "非数据/其他"]
+        by_pay = sorted(families, key=lambda x: -x["monthly_median"])
+        by_count = sorted(families, key=lambda x: -x["count"])
+        lines.append("月薪中位最高的岗位族：" + "、".join(
+            f"{x['family']} {_fmt_money(x['monthly_median'])}（{x['count']} 条）"
+            for x in by_pay[:4]))
+        lines.append("岗位数最多的方向：" + "、".join(
+            f"{x['family']} {x['count']} 条" for x in by_count[:3]))
+        tools.append("jobs.families")
+
+    if "experience" in foci:
+        lines.append("经验与月薪中位：" + "、".join(
+            f"{x['group']} {_fmt_money(x['monthly_median'])}"
+            for x in d["experience"]))
+        tools.append("jobs.experience")
+
+    if "education" in foci:
+        lines.append("学历与月薪中位：" + "、".join(
+            f"{x['group']} {_fmt_money(x['monthly_median'])}（{x['count']} 条）"
+            for x in d["education"] if x["group"] in ("大专", "本科", "硕士", "博士")))
+        tools.append("jobs.education")
+
+    if "company" in foci:
+        ct = sorted(d["company_type"], key=lambda x: -x["monthly_median"])[:3]
+        cs = sorted(d["company_size"], key=lambda x: -x["monthly_median"])[:3]
+        lines.append("公司类型月薪中位最高：" + "、".join(
+            f"{x['group']} {_fmt_money(x['monthly_median'])}" for x in ct))
+        lines.append("公司规模月薪中位最高：" + "、".join(
+            f"{x['group']} {_fmt_money(x['monthly_median'])}" for x in cs))
+        tools.append("jobs.company")
+
+    if not lines:
+        lines, tools = d["insights"][:4], ["jobs.overview"]
+
+    lines.append(
+        f"采样提醒：{_fmt_pct(o['top_date_share_pct'])} 的岗位集中在 {o['top_date']}，"
+        "日度趋势反映抓取节奏，不是真实招聘周期")
+    return lines, tools
+
+
+_FALLBACK_BUILDERS = {
+    "food": _food_answer,
+    "game": _game_answer,
+    "retention": _retention_answer,
+    "loan": _loan_answer,
+    "rental": _rental_answer,
+    "jobs": _jobs_answer,
+}
+
+
+def _fallback_agent(msg, history):
+    """没有 API Key / LLM 失败时的规则编排：调用同一分析层，按问题字段作答。"""
+    msg_text = str(msg).lower()
+    modules = _match_modules(msg_text, PRIMARY_KEYS) or _match_modules(msg_text, MODULE_KEYS)
+    context_text = ""
+    if not modules:
+        # 只有当前问题没提模块时，才继承最近一条带模块的历史问题；
+        # 否则前面问过租房/游戏，后面的问题会一直被历史模块污染。
+        for prev in reversed([
+            h.get("content", "") for h in history if h.get("role") == "user"
+        ]):
+            prev_text = str(prev).lower()
+            prev_modules = (_match_modules(prev_text, PRIMARY_KEYS)
+                            or _match_modules(prev_text, MODULE_KEYS))
+            if prev_modules:
+                modules = prev_modules
+                context_text = prev_text
+                break
+    text = (msg_text + " " + context_text).strip()
+    if not modules:
+        intro = (
+            "我是全栈数据分析平台的 Agent，可以回答 6 个模块的问题：\n"
+            "· 北京餐饮（价格带、菜系、区域、评分、米其林、夜宵）\n"
+            "· 游戏评论（情感、评分对照、主题、平台）\n"
+            "· 用户留存（队列矩阵、渠道、设备、流失）\n"
+            "· 贷款违约（AUC/KS、阈值决策、校准、分群）\n"
+            "· 北京租房（分房型区域价格、面积效应、配套）\n"
+            "· 数据岗招聘（薪资解析、城市、经验、学历、岗位族）\n\n"
+            "试试问：「北京哪个区餐厅最多？」"
+            "「数据岗里哪个方向薪资最高？」「贷款阈值应该定多少？」"
+        )
+        if not DEEPSEEK_KEY:
+            intro += "\n\n（当前未配置 DEEPSEEK_KEY，由本地规则引擎直接调用分析层。）"
+        return {"reply": intro, "tools": []}
+
+    sections, tools = [], []
+    for m in modules[:2]:
+        # 当前问题优先；追问没有字段词时，再从历史问题里继承上下文
+        foci = _infer_foci(m, msg) or _infer_foci(m, text)
+        lines, used = _FALLBACK_BUILDERS[m](foci)
+        sections.append(
+            f"【{MODULE_LABELS[m]}】\n" + "\n".join(f"· {x}" for x in lines)
+        )
+        tools.extend(used)
+
+    reply = "\n\n".join(sections)
+    if len(modules) > 2:
+        reply += f"\n\n（同时提到 {len(modules)} 个模块，这里先回答前 2 个；可以指定模块继续追问。）"
+    if not DEEPSEEK_KEY:
+        reply += "\n\n（当前未配置 DEEPSEEK_KEY，以上由本地规则引擎直接调用分析层；配置后可启用多轮工具编排。）"
+    return {"reply": reply, "tools": tools}
+
 
 @app.get("/agent", response_class=HTMLResponse)
 def agent_page():
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>AI Agent</title>
-<style>{COMMON_CSS}
-.chatbox{{background:#0d1520;border:1px solid#1a2a3a;border-radius:12px;padding:20px;min-height:400px;max-height:600px;overflow-y:auto;margin:16px 0}}
-.msg{{margin:12px 0;padding:12px 16px;border-radius:10px;max-width:80%;line-height:1.6;font-size:14px}}
-.user{{background:rgba(6,214,160,.15);margin-left:auto;text-align:right;color:#fff;border:1px solid rgba(6,214,160,.3)}}
-.agent{{background:#111827;color:#cbd5e1;border:1px solid#1e293b}}
-.input-row{{display:flex;gap:12px}}
-input{{flex:1;padding:14px;border:2px solid#1e293b;border-radius:10px;font-size:15px;outline:none;background:#0d1520;color:#cbd5e1}}
-input:focus{{border-color:#06d6a0}}
-button{{background:#06d6a0;color:#0d1520;border:none;padding:14px 28px;border-radius:10px;font-size:15px;cursor:pointer;font-weight:700}}
-button:hover{{background:#05b88a}}
-.loading{{color:#06d6a0;font-style:italic}}
-</style></head><body><div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div><div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div><div class="particle p8"></div>
-<h1>🤖 AI 数据分析 Agent</h1><a class="back" href="/">← 返回首页</a>
-<div class="insight">Agent 可以回答：汇总数据 / 比较分析 / 查询具体问题。试试问："北京餐饮有多少家店？各区均价排名？"</div>
-<div class="chatbox" id="chatbox">
-<div class="msg agent">👋 你好！我是数据分析 Agent。我可以帮你查询北京餐饮、游戏评论、用户留存、贷款预测等数据。有什么想了解的？</div>
-</div>
-<div class="input-row">
-<input id="userInput" placeholder="输入你的问题..." onkeydown="if(event.key==='Enter')send()">
-<button onclick="send()">发送</button>
-</div>
-<script>
-async function send(){{
-    let inp=document.getElementById('userInput');let msg=inp.value.trim();if(!msg)return;
-    let box=document.getElementById('chatbox');
-    box.innerHTML+='<div class="msg user">'+msg+'</div>';
-    box.innerHTML+='<div class="msg agent loading">思考中...</div>';
-    inp.value='';box.scrollTop=box.scrollHeight;
-    try{{
-        let r=await fetch('/api/agent/chat',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{message:msg}})}});
-        let d=await r.json();
-        box.removeChild(box.lastChild);
-        box.innerHTML+='<div class="msg agent">'+d.reply+(d.chart||'')+'</div>';
-        box.scrollTop=box.scrollHeight;
-    }}catch(e){{
-        box.removeChild(box.lastChild);
-        box.innerHTML+='<div class="msg agent">网络错误，请重试</div>';
-    }}
-}}
-</script></body></html>"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head>
+  {_head("AI Agent", "支持多轮工具调用与跨模块对比的数据分析 Agent")}
+</head><body>
+  {_topbar("agent")}
+  <main class="container">
+    <div class="chat-shell">
+      <div class="page-head">
+        <div class="eyebrow">Agent · Tool Orchestration</div>
+        <h1>问数据，而不是翻页面</h1>
+        <p>Agent 会按问题选择模块与字段，最多连续调用 3 次工具，再基于真实返回的数字回答。支持上下文追问和跨模块比较；没有配置 API Key 时自动降级为规则编排，仍然调用同一分析层。</p>
+      </div>
+
+      <div class="chatbox" id="chatbox">
+        <div class="msg agent">👋 你好，我是数据分析 Agent。可以问我北京餐饮的真实人均、具体餐厅推荐、游戏评论的情感与评分错位、留存渠道差异、贷款阈值、租房口径或数据岗薪资。也可以连续追问，比如「数据岗哪个方向薪资最高？再按城市拆一下」。</div>
+      </div>
+
+      <div class="suggestions">
+        <button data-q="北京餐饮人均消费的真实中位数是多少？为什么不能直接用平均值？">餐饮真实人均</button>
+        <button data-q="我想去北京吃饭，帮我推荐一家评分高、评论多的店">餐厅推荐</button>
+        <button data-q="游戏评论文本情感和用户评分为什么会对不上？">情感与评分错位</button>
+        <button data-q="哪个渠道的用户留存最好？广告投放值得继续吗？">渠道留存质量</button>
+        <button data-q="贷款模型的阈值应该定多少？为什么不是 0.5？">贷款最优阈值</button>
+        <button data-q="北京租房整租和合租的单价差异说明什么？">整租 vs 合租</button>
+        <button data-q="数据岗里哪个方向薪资最高？再按城市拆一下">岗位族与城市</button>
+      </div>
+
+      <div class="input-row" style="margin-top:14px">
+        <input id="userInput" placeholder="输入你的问题，例如：数据岗哪个方向薪资最高？" autocomplete="off">
+        <button id="sendBtn">发送</button>
+      </div>
+      <p class="hint" style="color:var(--dim);font-size:11px;margin-top:10px">回答由分析层实时计算；工具调用链会显示在每条回答上方。
+        <button id="resetBtn" class="reset-btn" type="button">清空对话</button>
+      </p>
+    </div>
+  </main>
+  {_footer()}
+  <script src="/static/common.js"></script>
+  <script src="/static/agent.js"></script>
+</body></html>"""
+
 
 @app.post("/api/agent/chat")
 async def agent_chat(req: dict):
-    msg = req.get("message", "").strip()
+    msg = str(req.get("message", "")).strip()
     if not msg:
-        return {"reply": "请输入问题"}
+        return {"reply": "请输入问题", "tools": []}
 
-    # 工具定义
-    tools_desc = """可用工具：
-1. food_summary — 查询北京餐饮概括数据（店铺总量、人均消费、最大品类）
-2. food_table — 生成北京餐饮菜系统计数据表格（HTML格式），如需要具体的菜系排名、各区对比时调用
-3. food_chart — 生成北京餐饮分析图表（base64图片），如需要可视化展示价格分布、区域对比时调用
-4. game_summary — 查询游戏评论概括数据（情感分布、平均评分、平台对比）
-5. game_chart — 生成游戏评论分析图表（base64图片）
-6. retention_summary — 查询用户留存概括数据
-7. retention_chart — 生成留存分析图表（base64图片）
-8. loan_summary — 查询贷款违约预测模型概括数据
-9. loan_chart — 生成贷款模型图表（base64图片）
-10. rent_summary — 查询北京租房概括数据（房源总量、平均租金、租金最高区域）
-11. rent_chart — 生成北京租房分析图表（base64图片），如各区租金对比、户型租金对比"""
+    raw_history = req.get("history") or []
+    history = []
+    if isinstance(raw_history, list):
+        for h in raw_history[-8:]:
+            if not isinstance(h, dict):
+                continue
+            role = h.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = str(h.get("content", ""))[:1200]
+            if content:
+                history.append({"role": role, "content": content})
 
-    # 第1步：LLM 决策
-    decision_prompt = f"""{tools_desc}
-用户问题：{msg}
-请决定应该调用哪个工具，或者直接回复。JSON格式：
-{{"action":"工具名"}} 或 {{"action":"chat","reply":"直接回复的内容"}}
-只输出JSON。"""
+    # 兼容旧前端：历史里若已经包含当前问题，去掉重复项
+    if history and history[-1]["role"] == "user" and history[-1]["content"].strip() == msg:
+        history.pop()
 
-    import requests as req
-    try:
-        r = req.post("https://api.deepseek.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}","Content-Type":"application/json"},
-            json={"model":"deepseek-chat","messages":[
-                {"role":"system","content":decision_prompt},{"role":"user","content":msg}
-            ],"temperature":0},timeout=30)
-        decision = r.json()["choices"][0]["message"]["content"]
-    except:
-        return {"reply": "LLM 调用失败，请确认 API Key 已设置"}
+    # 有 Key：多轮工具编排
+    if DEEPSEEK_KEY:
+        # 「推荐一家餐厅」这类请求必须落到具体店铺，不能只回模块概览
+        wants_food_rec = (
+            any(k in msg for k in ("推荐", "哪家", "好吃", "吃什么", "吃哪"))
+            and any(k in msg for k in PRIMARY_KEYS["food"])
+        )
+        observations = []
+        tools_used = []
+        for _ in range(3):
+            messages = [{"role": "system", "content": AGENT_SYSTEM}]
+            messages += history
+            messages.append({"role": "user", "content": msg})
+            messages += observations
+            out = _call_llm(messages)
+            decision = _parse_decision(out)
+            action = decision.get("action")
 
-    import json
-    try:
-        d = json.loads(decision)
-        action = d.get("action","chat")
-        if action == "chat":
-            return {"reply": d.get("reply","你好，请问有什么可以帮你的？")}
-    except:
-        return {"reply": f"Agent 决策解析失败，原始响应: {decision[:200]}"}
+            if action == "final":
+                if wants_food_rec and not tools_used:
+                    # LLM 想直接收尾：强制先取推荐工具，再让它基于真实店名回答
+                    action = "call"
+                    decision = {"action": "call", "module": "food", "focus": "recommend"}
+                else:
+                    reply = str(decision.get("reply", "")).strip()
+                    if reply:
+                        return {"reply": reply, "tools": tools_used}
+                    break
 
-    # 执行工具
-    result_data = ""; chart_html = ""
-    if action == "food_summary":
-        tc = df_food['菜系类型'].value_counts().index[0]; mp = int(df_food['人均消费'].median())
-        result_data = f"北京餐饮：{len(df_food):,}家店铺，人均消费中位数 ¥{mp}，最大品类 {tc}。"
-    elif action == "food_table":
-        ct = df_food.groupby('菜系类型').agg({'店铺id':'count','人均消费':'mean','评分':'mean'}).round(1)
-        ct.columns = ['店铺数','人均消费','评分']
-        top10 = ct[ct['店铺数']>=30].sort_values('人均消费',ascending=False).head(10)
-        rows_html = "".join(f"<tr><td>{i}</td><td>{r['店铺数']}</td><td>{r['人均消费']}</td><td>{r['评分']}</td></tr>" for i,r in top10.iterrows())
-        result_data = f"<table style='font-size:12px;width:100%'><tr><th>菜系</th><th>店铺数</th><th>人均消费</th><th>评分</th></tr>{rows_html}</table>"
-    elif action == "food_chart":
-        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
-        p=df_food.groupby('菜系类型')['人均消费'].mean().round(1);top5=p[p.index.isin(df_food['菜系类型'].value_counts().head(5).index)].sort_values(ascending=False)
-        ax1.barh(top5.index[::-1],top5.values[::-1],color='#C44E52');ax1.set_title('主要菜系人均消费')
-        ds=df_food.groupby('county').agg({'店铺id':'count','人均消费':'mean'}).round(1)
-        ds.columns=['店铺数','人均消费'];td=ds.sort_values('人均消费',ascending=False).head(5)
-        ax2.barh(td.index[::-1],td['人均消费'][::-1],color='#DD8452');ax2.set_title('各区人均消费 TOP5')
-        plt.tight_layout();chart_html=fig_to_html(fig)
-    elif action == "game_summary":
-        pos=(df_game['sentiment']=='好评').mean()*100;bp=df_game.groupby('Platform')['Rating'].mean().idxmax()
-        result_data=f"游戏评论：{len(df_game):,}条，好评率 {pos:.0f}%，最佳平台 {bp}。"
-    elif action == "game_chart":
-        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
-        sent=df_game['sentiment'].value_counts()
-        ax1.pie(sent.values,labels=sent.index,autopct='%1.1f%%',startangle=90,colors=['#55A868','#999','#C44E52']);ax1.set_title('情感分布')
-        ps=df_game.groupby('Platform')['Rating'].mean()
-        ax2.bar(ps.index,ps.values,color=['#2b5c9e','#55A868','#DD8452']);ax2.set_title('各平台平均评分')
-        plt.tight_layout();chart_html=fig_to_html(fig)
-    elif action == "retention_summary":
-        ret_vals=df_retention.groupby('week').apply(lambda x: x['retained'].sum()/df_retention.groupby('week')['new_users'].sum().sum()*100)
-        w1=round(ret_vals.values[0],1);result_data=f"用户留存：首周留存率 {w1}%，约 {100-w1:.0f}% 的用户首周后流失。"
-    elif action == "retention_chart":
-        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
-        ret_vals=df_retention.groupby('week').apply(lambda x: x['retained'].sum()/df_retention.groupby('week')['new_users'].sum().sum()*100)
-        ax1.plot(ret_vals.index,ret_vals.values,'o-',color='#2b5c9e',linewidth=2.5,markersize=10);ax1.set_title('留存曲线');ax1.set_ylabel('%');ax1.grid(alpha=.3)
-        heat=df_retention.groupby('week')['retained'].sum()
-        ax2.bar(heat.index,heat.values,color='#DD8452');ax2.set_title('每周回访人数')
-        plt.tight_layout();chart_html=fig_to_html(fig)
-    elif action == "loan_summary":
-        result_data="贷款违约预测：5,000条模拟信贷数据，随机森林 AUC 0.94、逻辑回归 0.90——违约风险存在非线性交互（如高负债×低信用），树模型能捕捉、线性模型不能，所以随机森林更强。"
-    elif action == "loan_chart":
-        from sklearn.ensemble import RandomForestClassifier;from sklearn.model_selection import train_test_split
-        np.random.seed(42);n2=5000
-        X2=pd.DataFrame(dict(credit_score=np.clip(np.random.normal(650,80,n2).astype(int),300,850),debt_ratio=np.random.uniform(0,.7,n2).round(2),income=np.clip(np.random.lognormal(8.8,.5,n2).astype(int),30000,2000000),has_house=np.random.choice([0,1],n2,p=[.5,.5]),has_car=np.random.choice([0,1],n2,p=[.4,.6]),age=np.clip(np.random.normal(38,10,n2).astype(int),22,65),emp_years=np.clip(np.random.exponential(5,n2).astype(int),0,40)))
-        risk2=-1.5+3.0*((X2['debt_ratio']>0.5)&(X2['credit_score']<600)).astype(int)+2.5*((X2['debt_ratio']>0.35)&(X2['income']<90000)).astype(int)+1.5*((X2['has_house']==0)&(X2['has_car']==0)&(X2['debt_ratio']>0.3)).astype(int)-0.01*X2['credit_score']/10-0.2*X2['has_house']-0.15*X2['has_car']
-        lo=risk2+np.random.normal(0,1.2,n2)
-        y2=(1/(1+np.exp(-lo))>np.percentile(1/(1+np.exp(-lo)),85)).astype(int)
-        Xt2,_,yt2,_=train_test_split(X2,y2,test_size=.2,random_state=42)
-        rf2=RandomForestClassifier(n_estimators=100,max_depth=6,random_state=42);rf2.fit(Xt2,yt2)
-        imp2=pd.DataFrame({'特征':X2.columns,'重要性':rf2.feature_importances_}).sort_values('重要性',ascending=False)
-        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
-        ax1.barh(imp2['特征'][::-1],imp2['重要性'][::-1],color='#2b5c9e');ax1.set_title('特征重要性')
-        ax2.bar(['正常还款','违约'],[100-y2.mean()*100,y2.mean()*100],color=['#55A868','#C44E52']);ax2.set_title('违约率分布')
-        plt.tight_layout();chart_html=fig_to_html(fig)
-    elif action == "rent_summary":
-        cnt=len(df_rental);avg=int(df_rental['price_clean'].mean())
-        top=df_rental.groupby('district')['price_clean'].mean().sort_values(ascending=False).index[0]
-        result_data=f"北京租房：{cnt:,}套房源，平均租金 ¥{avg}/月，租金最高区域 {top}。"
-    elif action == "rent_chart":
-        fig,(ax1,ax2)=plt.subplots(1,2,figsize=(10,4))
-        by_dist=df_rental.groupby('district')['price_clean'].mean().round(0).sort_values(ascending=False).head(8)
-        ax1.barh(by_dist.index[::-1],by_dist.values[::-1],color='#2b5c9e');ax1.set_title('各区平均租金 TOP8');ax1.set_xlabel('元/月')
-        rt=df_rental[df_rental['户型'].notna()&(df_rental['户型']!='')]
-        by_type=rt.groupby('户型')['price_clean'].mean().round(0).sort_values(ascending=False).head(6)
-        ax2.barh(by_type.index[::-1],by_type.values[::-1],color='#DD8452');ax2.set_title('各户型平均租金 TOP6');ax2.set_xlabel('元/月')
-        plt.tight_layout();chart_html=fig_to_html(fig)
-    else:
-        return {"reply": f"未知请求，请重新描述。可用功能：餐饮分析、游戏评论、留存分析、贷款预测、租房"}
+            module = str(decision.get("module") or decision.get("tool") or "").lower()
+            if action in ("call", "tool") and module in MODULE_LABELS:
+                focus = _normalize_focus(decision.get("focus", "overview"))
+                if wants_food_rec and module == "food" and not tools_used:
+                    focus = "recommend"
+                try:
+                    result = _agent_tool(module, focus, decision.get("params"))
+                except Exception as e:
+                    result = _json_text({"error": f"工具执行失败：{e}"})
+                tools_used.append(f"{module}.{focus}")
+                observations.append({
+                    "role": "assistant",
+                    "content": json.dumps(decision, ensure_ascii=False),
+                })
+                observations.append({
+                    "role": "user",
+                    "content": (
+                        f"工具 {module}.{focus} 返回：\n{result}\n\n"
+                        "请判断信息是否足够：足够则输出 "
+                        '{"action":"final","reply":"..."}；'
+                        "否则继续调用下一个工具。"
+                    ),
+                })
+                continue
+            break
 
-    # LLM 总结
-    if result_data:
-        summary_prompt = f"用户问题：{msg}\n查询结果：{result_data}\n请用简洁中文总结（1-3句话），可以加业务建议。"
-        try:
-            r2 = req.post("https://api.deepseek.com/v1/chat/completions",
-                headers={"Authorization":f"Bearer {DEEPSEEK_KEY}","Content-Type":"application/json"},
-                json={"model":"deepseek-chat","messages":[
-                    {"role":"system","content":"你是基于 DeepSeek 的数据分析AI助手。如果用户问你的模型名字，回答 DeepSeek。用中文回复。"},
-                    {"role":"user","content":summary_prompt}
-                ],"temperature":0},timeout=30)
-            summary = r2.json()["choices"][0]["message"]["content"]
-        except:
-            summary = result_data
-    else:
-        summary = ""
-    return {"reply": summary, "chart": chart_html}
+        # 调用过工具但没给出最终回答：让 LLM 基于观察结果收尾
+        if observations:
+            messages = [{"role": "system", "content": AGENT_SYSTEM}]
+            messages += history
+            messages.append({"role": "user", "content": msg})
+            messages += observations
+            messages.append({
+                "role": "user",
+                "content": "请直接给出最终回答，不要再调用工具。",
+            })
+            out = _call_llm(messages)
+            decision = _parse_decision(out)
+            if decision.get("reply"):
+                return {"reply": str(decision["reply"]), "tools": tools_used}
+        # LLM 失败：落到规则引擎（工具标签必须与最终回答一致）
+        fallback = _fallback_agent(msg, history)
+        return {"reply": fallback["reply"], "tools": fallback["tools"]}
 
-# ===== 启动 =====
-if __name__ == '__main__':
+    # 无 Key：规则编排
+    fallback = _fallback_agent(msg, history)
+    return {"reply": fallback["reply"], "tools": fallback["tools"]}
+
+
+# ===== JSON API =====
+@app.get("/api/food")
+def api_food():
+    """北京餐饮完整分析结果，供页面 / Agent 复用。"""
+    return JSONResponse(get_food_analysis())
+
+
+@app.get("/api/game")
+def api_game():
+    """游戏评论：VADER 文本情感 + 评分对照 + 主题词典。"""
+    return JSONResponse(get_game_analysis())
+
+
+@app.get("/api/retention")
+def api_retention():
+    """用户留存：注册周队列矩阵 + 渠道/设备差异。"""
+    return JSONResponse(get_retention_analysis())
+
+
+@app.get("/api/loan")
+def api_loan():
+    """贷款违约：ROC/PR、KS、阈值决策、校准与分群。"""
+    return JSONResponse(get_loan_analysis())
+
+
+@app.get("/api/rental")
+def api_rental():
+    """北京租房：分房型的区域价格、面积效应与配套字段质量。"""
+    return JSONResponse(get_rental_analysis())
+
+
+@app.get("/api/jobs")
+def api_jobs():
+    """数据岗招聘：薪资解析、城市/经验/学历/岗位族结构。"""
+    return JSONResponse(get_jobs_analysis())
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "modules": list(MODULE_MAP)}
+
+
+if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
