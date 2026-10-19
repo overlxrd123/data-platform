@@ -23,6 +23,8 @@
     const msg = input.value.trim();
     if (!msg || busy) return;
     busy = true;
+    document.getElementById('resetBtn').disabled = true;
+    document.querySelectorAll('.suggestions button').forEach(b => b.disabled = true);
     btn.disabled = true;
     btn.textContent = '思考中…';
     input.value = '';
@@ -46,9 +48,13 @@
       if (history.length > 16) history = history.slice(-16);
     } catch (e) {
       pending.remove();
-      append('agent', `请求失败：${C.esc(e.message)}。请确认后端已启动。`);
+      history.pop();
+      input.value = msg;
+      append('agent', `暂时未能完成分析（${C.esc(e.message)}），问题已保留，可重试。`);
     } finally {
       busy = false;
+      document.getElementById('resetBtn').disabled = false;
+      document.querySelectorAll('.suggestions button').forEach(b => b.disabled = false);
       btn.disabled = false;
       btn.textContent = '发送';
       input.focus();
@@ -57,7 +63,7 @@
 
   btn.addEventListener('click', send);
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
     }

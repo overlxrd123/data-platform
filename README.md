@@ -39,6 +39,10 @@ data_platform/
 │   ├── rental.py
 │   └── jobs.py
 ├── static/
+│   ├── cover.html          # 封面页骨架
+│   ├── cover.css / cover.js # 封面样式与数据球动画
+│   ├── shell.js            # 模块页章节导航 / 图表导出
+│   ├── workspace.js        # 工作台数据集搜索与规模图
 │   ├── app.css             # 设计系统：深色主题 / 响应式
 │   ├── common.js           # KPI / 面板 / 表格 / ECharts 封装
 │   ├── food.js … jobs.js   # 六个模块的页面脚本
@@ -54,7 +58,7 @@ data_platform/
 
 分析层统一暴露 `get_xxx_analysis() -> dict`，页面、JSON API、Agent 复用同一份结果，避免业务口径分叉。
 
-前端不依赖 Vue/React 或构建工具：FastAPI 返回页面骨架，浏览器端 `fetch` JSON API 后用 ECharts 渲染交互图表，首屏与部署都很轻。
+前端不依赖 Vue/React 或构建工具：FastAPI 返回页面骨架，浏览器端 `fetch` JSON API 后用 ECharts 渲染交互图表，首屏与部署都很轻。入口为封面页 `/`，工作台在 `/workspace`；工作台支持数据集搜索与规模分布图，模块页支持章节导航、图表导出、响应式布局与键盘跳转。
 
 ## JSON API
 

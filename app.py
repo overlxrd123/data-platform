@@ -87,14 +87,15 @@ MODULE_MAP = {m["slug"]: m for m in MODULES}
 
 
 def _nav(active=""):
-    links = [("", "首页")] + [(m["slug"], m["title"]) for m in MODULES]
+    links = [("", "◫", "工作台")] + [(m["slug"], str(i + 1).zfill(2), m["title"]) for i, m in enumerate(MODULES)]
     items = []
-    for slug, label in links:
-        href = "/" if slug == "" else f"/module/{slug}"
+    for slug, icon, label in links:
+        href = "/workspace" if slug == "" else f"/module/{slug}"
         cls = "active" if active == slug else ""
-        items.append(f'<a href="{href}" class="{cls}">{label}</a>')
-    items.append('<a href="/agent" class="agent-link">AI Agent</a>')
-    return f'<nav class="nav">{"".join(items)}</nav>'
+        current = ' aria-current="page"' if active == slug else ''
+        items.append(f'<a href="{href}" class="{cls}"{current}><span class="nav-icon">{icon}</span>{label}</a>')
+    items.append(f'<a href="/agent" class="agent-link {"active" if active == "agent" else ""}"><span class="nav-icon">✳</span>AI 分析助手<span class="nav-badge">AI</span></a>')
+    return f'<nav class="nav" aria-label="主要导航">{"".join(items)}</nav>'
 
 
 def _head(title, desc=""):
@@ -102,129 +103,59 @@ def _head(title, desc=""):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="{desc or 'FastAPI + Pandas + Scikit-learn + ECharts 数据分析平台'}">
   <title>{title} · 全栈数据分析平台</title>
-  <link rel="stylesheet" href="/static/app.css">"""
+  <link rel="stylesheet" href="/static/app.css">\n  <script src="/static/shell.js" defer></script>"""
 
 
 def _topbar(active=""):
-    return f"""<header class="topbar">
-    <div class="topbar-inner">
-      <a class="brand" href="/"><span class="brand-mark">◈</span>数据平台 · DataLab</a>
-      {_nav(active)}
-    </div>
-  </header>"""
+    label = MODULE_MAP[active]["title"] if active in MODULE_MAP else ("AI 分析助手" if active == "agent" else "工作台")
+    return f"""<a class="skip-link" href="#main-content">跳转到内容</a>
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">▥</span><span>DataLab<small>数据分析工作空间</small></span></a>
+      <div class="nav-caption">WORKSPACE / 工作空间</div>{_nav(active)}
+      <div class="sidebar-bottom"><span class="status-dot"></span>统一分析引擎<small>页面 · API · AI 共享分析口径</small><a href="/api/docs">查看 API 文档 ↗</a></div>
+    </aside>
+    <header class="topbar" id="main-content"><div class="topbar-inner"><div class="breadcrumb">工作空间 <span>/</span> <b>{label}</b></div><a href="/agent" class="topbar-action">✳ 用 AI 探索数据 <span>↗</span></a></div></header>"""
 
 
 def _footer():
-    return """<footer class="footer">
-    <div class="footer-inner">
-      <span>FastAPI · Pandas · Scikit-learn · ECharts 5 · VADER</span>
-      <span>分析层与页面 / API / Agent 共用同一套口径</span>
-    </div>
-  </footer>"""
+    return """<footer class="footer"><div class="footer-inner"><span>DataLab · 让每个结论都有据可循</span><span>FastAPI / Pandas / Scikit-learn / ECharts</span></div></footer>"""
 
 
-# ===== 首页 =====
 @app.get("/", response_class=HTMLResponse)
+def cover():
+    with open(os.path.join(BASE_DIR, "static", "cover.html"), encoding="utf-8") as page:
+        return page.read()
+
+
+@app.get("/workspace", response_class=HTMLResponse)
 def home():
     cards = []
-    for m in MODULES:
-        tags = "".join(f'<span class="tag">{t}</span>' for t in m["tags"])
-        cards.append(f"""
-        <a class="module-card" href="/module/{m['slug']}" style="--accent:{m['accent']}">
-          <div class="icon">{m['icon']}</div>
-          <h3>{m['title']}</h3>
-          <p>{m['desc']}</p>
-          <div class="chips">{tags}</div>
-          <div class="card-stats">
-            <div><b>{m['count']}</b><span>数据记录</span></div>
-            <div><b>{m['en']}</b><span>MODULE</span></div>
-          </div>
-          <span class="go">→</span>
-        </a>""")
-
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN"><head>
-  {_head("数据分析平台", "六个数据分析模块、统一分析层与多轮工具编排 Agent")}
-</head><body>
-  {_topbar("")}
-  <main class="container">
-    <section class="hero">
-      <div class="hero-grid">
-        <div>
-          <div class="eyebrow">Full-stack Data Analysis · 2026</div>
-          <h1>把数据问题<br><span class="gradient-text">从口径做到结论</span></h1>
-          <p class="lead">六个真实/模拟数据集，覆盖缺失值、文本情感、队列留存、风控阈值、合成数据识别与薪资解析。每个结论都能追溯到代码里的统计口径，而不是一张好看的图。</p>
-          <div class="hero-actions">
-            <a class="btn primary" href="/module/food">开始探索 →</a>
-            <a class="btn" href="/agent">向 Agent 提问</a>
-            <a class="btn" href="/api/docs">API 文档</a>
-          </div>
-        </div>
-        <div class="hero-stats">
-          <div class="hero-stat"><div class="value">110,949</div><div class="label">清洗前后数据记录</div></div>
-          <div class="hero-stat"><div class="value">6</div><div class="label">业务分析模块</div></div>
-          <div class="hero-stat"><div class="value">1</div><div class="label">统一分析层</div></div>
-          <div class="hero-stat"><div class="value">多轮</div><div class="label">Agent 工具编排</div></div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <div class="eyebrow">Modules</div>
-      <h2 style="font-size:22px;letter-spacing:-.02em;margin-bottom:4px">六个模块，六种数据问题</h2>
-      <p style="color:var(--muted);font-size:13.5px;max-width:760px">每个模块都先回答「这份数据能信到什么程度」，再给业务结论。标注为模拟的数据会写明生成机制，不把假设当事实。</p>
-      <div class="module-grid">{''.join(cards)}</div>
-    </section>
-
-    <section style="margin-top:44px">
-      <div class="eyebrow">Principles</div>
-      <div class="grid-3">
-        <div class="panel">
-          <h2>先检查数据，再解释现象</h2>
-          <p class="hint">0 元人均是未采集、评论评分与文本情感会错位、租房配套字段接近随机、招聘发布时间是抓取伪影——这些发现决定了后面的结论能不能写。</p>
-        </div>
-        <div class="panel">
-          <h2>同一个指标只有一套算法</h2>
-          <p class="hint">analysis/ 下的纯计算层同时驱动页面、JSON API 和 Agent。改一次口径，三处同步，不会出现页面和回答对不上的情况。</p>
-        </div>
-        <div class="panel">
-          <h2>结论必须带数字与边界</h2>
-          <p class="hint">每条 insight 都引用具体统计量，并标注样本量、置信边界或不可外推的原因；模拟数据会明确标注，不伪装成真实业务。</p>
-        </div>
-      </div>
-    </section>
-
-    <section style="margin-top:44px">
-      <div class="eyebrow">Architecture</div>
-      <div class="grid-2">
-        <div class="panel">
-          <h2>请求链路</h2>
-          <pre class="arch">浏览器
-  ├── /static/*.js   ECharts 渲染
-  ├── /api/&lt;module&gt;   JSON 数据
-  └── /api/agent/chat 多轮工具调用
-          ↓
-    analysis/*.py   纯计算 · lru_cache
-          ↓
-    data/*.csv · *.xlsx</pre>
-        </div>
-        <div class="panel">
-          <h2>技术栈</h2>
-          <div class="chips">
-            <span class="chip"><b>FastAPI</b> 服务端渲染 + JSON API</span>
-            <span class="chip"><b>Pandas / NumPy</b> 清洗与聚合</span>
-            <span class="chip"><b>Scikit-learn</b> 风控模型</span>
-            <span class="chip"><b>VADER</b> 英文情感分析</span>
-            <span class="chip"><b>ECharts 5</b> 交互图表</span>
-            <span class="chip"><b>DeepSeek</b> Agent 工具编排</span>
-          </div>
-          <p class="hint">没有前端框架：静态资源 + fetch + ECharts，部署简单，首屏不依赖构建工具。未配置 DEEPSEEK_KEY 时，Agent 自动降级为规则编排，仍然调用真实分析层。</p>
-        </div>
-      </div>
-    </section>
-  </main>
-  {_footer()}
-</body></html>"""
+    for i, m in enumerate(MODULES):
+        simulated = m['slug'] in ('retention', 'loan')
+        source = '模拟数据' if simulated else '数据集分析'
+        tags = ''.join(f'<span class="tag">{t}</span>' for t in m['tags'])
+        cards.append(f"""<a class="module-card" href="/module/{m['slug']}" style="--accent:{m['accent']}">
+          <div class="card-top"><span class="module-index">0{i+1} / {m['en']}</span><span class="source-badge {'simulated' if simulated else ''}">{source}</span></div>
+          <div class="module-title"><span class="icon">{m['icon']}</span><h3>{m['title']}</h3></div>
+          <p>{m['desc']}</p><div class="chips">{tags}</div>
+          <div class="card-stats"><div><b>{m['count']}</b><span>条原始记录</span></div><span class="card-open">进入分析 ↗</span></div></a>""")
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head>{_head("工作台")}</head><body>
+    {_topbar()}
+    <main class="container dashboard">
+      <section class="workspace-heading"><div><div class="eyebrow">OVERVIEW / 数据概览</div><h1>从数据出发，让洞察发生<span class="heading-dot">.</span></h1><p>六个业务场景，一个分析工作空间。选择数据集，探索指标背后的原因。</p></div><a class="btn" href="#datasets">浏览数据集 ↓</a></section>
+      <section class="overview-stats" aria-label="平台数据概览">
+        <div><span class="stat-caption">原始数据记录 <i>↗</i></span><strong>110,949<small>条</small></strong><span class="stat-foot">涵盖公开数据集与模拟样本</span></div>
+        <div><span class="stat-caption">业务分析场景 <i>◫</i></span><strong>06<small>个</small></strong><span class="stat-foot">消费 · 文本 · 增长 · 风控 · 租房 · 招聘</span></div>
+        <div><span class="stat-caption">数据来源构成 <i>▤</i></span><strong>4 <em>+</em> 2</strong><span class="stat-foot">4 个数据集 / 2 个模拟业务场景</span></div>
+        <div><span class="stat-caption">分析方式 <i>✳</i></span><strong class="stat-text">可视化 + AI</strong><span class="stat-foot">图表探索与自然语言追问</span></div>
+      </section>
+      <section class="overview-row">
+        <div class="panel distribution-panel"><div class="panel-head"><div><h2>数据集规模分布</h2><p>各模块原始记录数 · 清洗后样本以模块页为准</p></div><span class="mini-label">6 DATASETS</span></div><div id="datasetChart" class="chart" style="height:245px" role="img" aria-label="六个数据集记录数对比"></div></div>
+        <div class="assistant-card"><span class="assistant-symbol">✳</span><div class="eyebrow">YOUR ANALYSIS COPILOT</div><h2>带着问题，<br>发现数据的另一面。</h2><p>从选择分析工具到引用计算结果，<br>让一次提问成为探索的起点。</p><a class="btn primary" href="/agent">开始与数据对话 <span>↗</span></a><span class="assistant-note">支持上下文追问与跨模块对比</span></div>
+      </section>
+      <section id="datasets"><div class="section-heading"><div><div class="eyebrow">EXPLORE / 开始探索</div><h2>选择你的分析场景</h2></div><label class="dataset-search"><span>⌕</span><input id="datasetSearch" type="search" placeholder="搜索场景、关键词…" aria-label="搜索分析场景"></label></div><div class="module-grid">{''.join(cards)}</div><p id="searchEmpty" class="search-empty" hidden>没有匹配的场景，试试“餐饮”“留存”或“薪资”。</p><div class="dataset-count" id="datasetCount" aria-live="polite">全部 6 个分析场景</div></section>
+      <section class="method-strip"><div><span>01</span><b>检查数据质量</b><small>识别缺失值与样本偏差</small></div><div><span>02</span><b>探索业务指标</b><small>用交互图表理解分布与差异</small></div><div><span>03</span><b>形成可追溯结论</b><small>引用统计结果，标明适用边界</small></div></section>
+    </main>{_footer()}<script src="/static/echarts.min.js"></script><script src="/static/common.js"></script><script src="/static/workspace.js"></script></body></html>"""
 
 
 # ===== 模块页 =====
@@ -1054,10 +985,10 @@ def agent_page():
       <div class="page-head">
         <div class="eyebrow">Agent · Tool Orchestration</div>
         <h1>问数据，而不是翻页面</h1>
-        <p>Agent 会按问题选择模块与字段，最多连续调用 3 次工具，再基于真实返回的数字回答。支持上下文追问和跨模块比较；没有配置 API Key 时自动降级为规则编排，仍然调用同一分析层。</p>
+        <p>用自然语言探索六个分析场景。回答引用分析工具的计算结果，支持连续追问与跨模块对比。</p><div class="agent-mode">{"✳ AI 工具编排模式" if DEEPSEEK_KEY else "◈ 本地规则模式 · 已连接分析工具"}</div>
       </div>
 
-      <div class="chatbox" id="chatbox">
+      <div class="chatbox" id="chatbox" role="log" aria-label="分析对话" aria-live="polite">
         <div class="msg agent">👋 你好，我是数据分析 Agent。可以问我北京餐饮的真实人均、具体餐厅推荐、游戏评论的情感与评分错位、留存渠道差异、贷款阈值、租房口径或数据岗薪资。也可以连续追问，比如「数据岗哪个方向薪资最高？再按城市拆一下」。</div>
       </div>
 
@@ -1072,7 +1003,7 @@ def agent_page():
       </div>
 
       <div class="input-row" style="margin-top:14px">
-        <input id="userInput" placeholder="输入你的问题，例如：数据岗哪个方向薪资最高？" autocomplete="off">
+        <input aria-label="向数据分析助手提问" id="userInput" placeholder="输入你的问题，例如：数据岗哪个方向薪资最高？" autocomplete="off">
         <button id="sendBtn">发送</button>
       </div>
       <p class="hint" style="color:var(--dim);font-size:11px;margin-top:10px">回答由分析层实时计算；工具调用链会显示在每条回答上方。
