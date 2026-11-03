@@ -515,6 +515,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   opacity: .85;
 }
 .msg.loading { color: var(--cyan); font-style: italic; min-height: 0; }
+.agent-source { color: var(--dim); font-size: 11px; margin-top: 9px; }
 .input-row { display: flex; gap: 10px; }
 .input-row input {
   flex: 1;

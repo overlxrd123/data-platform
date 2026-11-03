@@ -6,3 +6,4 @@ openpyxl
 scikit-learn
 nltk
 requests
+httpx>=0.27,<1

@@ -7,7 +7,8 @@ import json
 import os
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from agent_runtime import Agent
 from fastapi.staticfiles import StaticFiles
 
 from analysis.food import get_food_analysis, recommend_food
@@ -268,8 +269,8 @@ AGENT_SYSTEM = """你是「全栈数据分析平台」的分析 Agent，服务�
 - jobs：数据岗招聘。focus = overview / cities / families / experience / education / company
 
 规则：
-1. 一次只调用一个工具。问题涉及多个模块或多个维度时，分多次调用。
-2. 最多调用 3 次；信息足够后立即给最终回答。
+1. 一次规划回答当前问题所需的工具，最多 3 个；同一工具不要重复选择。
+2. 将工具计划放在 calls 数组中。工具结果将交给后续模型生成回答，你不必规划多轮调用。
 3. 回答必须引用工具返回的具体数字，不要编造。
 4. 如果用户在做比较，先分别取数，再给结论。
 5. 用户问「推荐一家 / 吃什么 / 哪家好吃」时，必须调用 food + recommend，
@@ -282,9 +283,10 @@ AGENT_SYSTEM = """你是「全栈数据分析平台」的分析 Agent，服务�
    不要把历史里问过的其他模块带进本轮回答，也不要无故调用其他模块的工具。
 8. 用中文回答，简洁，先结论后依据。
 
+如无需查询数据，可以直接 final。数据结论必须先选择工具，不要凭记忆回答。
 只输出 JSON，格式示例：
-{"action":"call","module":"food","focus":"price"}
-{"action":"call","module":"food","focus":"recommend","params":{"district":"丰台区","max_price":100}}
+{"action":"call","calls":[{"module":"food","focus":"price"}]}
+{"action":"call","calls":[{"module":"food","focus":"recommend","params":{"district":"丰台区","max_price":100}}]}
 {"action":"final","reply":"最终回答"}
 """
 
@@ -449,53 +451,6 @@ def _agent_tool(module, focus="overview", params=None):
         return _json_text(payload)
 
     return _json_text({"error": f"未知模块 {module}，可用：{list(MODULE_LABELS)}"})
-
-
-def _call_llm(messages, temperature=0, timeout=45):
-    if not DEEPSEEK_KEY:
-        return None
-    import time
-    import requests as req
-    for attempt in range(2):
-        try:
-            r = req.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {DEEPSEEK_KEY}",
-                         "Content-Type": "application/json"},
-                json={"model": "deepseek-chat", "messages": messages,
-                      "temperature": temperature},
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
-        except Exception:
-            pass
-        if attempt == 0:
-            time.sleep(0.8)  # 网络抖动 / 429 时重试一次
-    return None
-
-
-def _parse_decision(text):
-    if not text:
-        return {}
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.strip("`")
-        if s.startswith("json"):
-            s = s[4:]
-    try:
-        return json.loads(s)
-    except Exception:
-        i, j = s.find("{"), s.rfind("}")
-        if i >= 0 and j > i:
-            try:
-                return json.loads(s[i:j + 1])
-            except Exception:
-                pass
-    # 模型偶尔直接输出自然语言：当作 final 回答，而不是丢掉后走通用兜底
-    if s.startswith("{") or s.startswith("```"):
-        return {}
-    return {"action": "final", "reply": s}
 
 
 def _match_modules(text, mapping):
@@ -1013,109 +968,31 @@ def agent_page():
   </main>
   {_footer()}
   <script src="/static/common.js"></script>
-  <script src="/static/agent.js"></script>
+  <script src="/static/agent.js?v=20261103"></script>
 </body></html>"""
+
+
+def _new_agent():
+    return Agent(DEEPSEEK_KEY, AGENT_SYSTEM, MODULE_LABELS,
+                 _agent_tool, _fallback_agent, _normalize_focus)
 
 
 @app.post("/api/agent/chat")
 async def agent_chat(req: dict):
-    msg = str(req.get("message", "")).strip()
-    if not msg:
-        return {"reply": "请输入问题", "tools": []}
+    """兼容原 JSON 接口；新增 source、耗时及请求编号。"""
+    async for event in _new_agent().events(req):
+        if event["type"] == "done":
+            return {k: v for k, v in event.items() if k != "type"}
 
-    raw_history = req.get("history") or []
-    history = []
-    if isinstance(raw_history, list):
-        for h in raw_history[-8:]:
-            if not isinstance(h, dict):
-                continue
-            role = h.get("role")
-            if role not in ("user", "assistant"):
-                continue
-            content = str(h.get("content", ""))[:1200]
-            if content:
-                history.append({"role": role, "content": content})
 
-    # 兼容旧前端：历史里若已经包含当前问题，去掉重复项
-    if history and history[-1]["role"] == "user" and history[-1]["content"].strip() == msg:
-        history.pop()
-
-    # 有 Key：多轮工具编排
-    if DEEPSEEK_KEY:
-        # 「推荐一家餐厅」这类请求必须落到具体店铺，不能只回模块概览
-        wants_food_rec = (
-            any(k in msg for k in ("推荐", "哪家", "好吃", "吃什么", "吃哪"))
-            and any(k in msg for k in PRIMARY_KEYS["food"])
-        )
-        observations = []
-        tools_used = []
-        for _ in range(3):
-            messages = [{"role": "system", "content": AGENT_SYSTEM}]
-            messages += history
-            messages.append({"role": "user", "content": msg})
-            messages += observations
-            out = _call_llm(messages)
-            decision = _parse_decision(out)
-            action = decision.get("action")
-
-            if action == "final":
-                if wants_food_rec and not tools_used:
-                    # LLM 想直接收尾：强制先取推荐工具，再让它基于真实店名回答
-                    action = "call"
-                    decision = {"action": "call", "module": "food", "focus": "recommend"}
-                else:
-                    reply = str(decision.get("reply", "")).strip()
-                    if reply:
-                        return {"reply": reply, "tools": tools_used}
-                    break
-
-            module = str(decision.get("module") or decision.get("tool") or "").lower()
-            if action in ("call", "tool") and module in MODULE_LABELS:
-                focus = _normalize_focus(decision.get("focus", "overview"))
-                if wants_food_rec and module == "food" and not tools_used:
-                    focus = "recommend"
-                try:
-                    result = _agent_tool(module, focus, decision.get("params"))
-                except Exception as e:
-                    result = _json_text({"error": f"工具执行失败：{e}"})
-                tools_used.append(f"{module}.{focus}")
-                observations.append({
-                    "role": "assistant",
-                    "content": json.dumps(decision, ensure_ascii=False),
-                })
-                observations.append({
-                    "role": "user",
-                    "content": (
-                        f"工具 {module}.{focus} 返回：\n{result}\n\n"
-                        "请判断信息是否足够：足够则输出 "
-                        '{"action":"final","reply":"..."}；'
-                        "否则继续调用下一个工具。"
-                    ),
-                })
-                continue
-            break
-
-        # 调用过工具但没给出最终回答：让 LLM 基于观察结果收尾
-        if observations:
-            messages = [{"role": "system", "content": AGENT_SYSTEM}]
-            messages += history
-            messages.append({"role": "user", "content": msg})
-            messages += observations
-            messages.append({
-                "role": "user",
-                "content": "请直接给出最终回答，不要再调用工具。",
-            })
-            out = _call_llm(messages)
-            decision = _parse_decision(out)
-            if decision.get("reply"):
-                return {"reply": str(decision["reply"]), "tools": tools_used}
-        # LLM 失败：落到规则引擎（工具标签必须与最终回答一致）
-        fallback = _fallback_agent(msg, history)
-        return {"reply": fallback["reply"], "tools": fallback["tools"]}
-
-    # 无 Key：规则编排
-    fallback = _fallback_agent(msg, history)
-    return {"reply": fallback["reply"], "tools": fallback["tools"]}
+@app.post("/api/agent/chat/stream")
+async def agent_chat_stream(req: dict):
+    """逐行 JSON：状态、增量正文、最终结果；客户端断开时取消模型请求。"""
+    async def stream():
+        async for event in _new_agent().events(req):
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+    return StreamingResponse(stream(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ===== JSON API =====

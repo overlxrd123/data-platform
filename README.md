@@ -1,6 +1,6 @@
 # 全栈数据分析平台
 
-FastAPI + Pandas + Scikit-learn + ECharts 的一体化数据分析平台：约 11.1 万条记录、6 个业务模块、统一分析层、JSON API，以及支持多轮工具编排（最多 3 次工具调用，无 API Key 时自动降级为规则引擎）的 AI Agent。
+FastAPI + Pandas + Scikit-learn + ECharts 的一体化数据分析平台：约 11.1 万条记录、6 个业务模块、统一分析层、JSON API，以及支持一次规划最多 3 个工具、流式回答和调用诊断（无 API Key 或调用失败时降级为规则引擎）的 AI Agent。
 
 在线地址：https://data-platform-vp73.onrender.com
 
@@ -14,7 +14,7 @@ FastAPI + Pandas + Scikit-learn + ECharts 的一体化数据分析平台：约 1
 | 🏦 贷款违约 | 5,000 条模拟信贷 | ROC/PR、KS、阈值决策、概率校准、置换重要性、分群违约率 |
 | 🏘️ 北京租房 | 35,082 条房源 | 分房型的区域价格、面积与单价关系、地铁/配套字段质量核查 |
 | 💼 数据岗招聘 | 3,523 条岗位 | 薪资字符串解析、城市/经验/学历/公司规模、岗位族薪资结构 |
-| 🤖 AI Agent | 6 个模块 | 多轮工具调用、上下文追问、跨模块对比、具体餐厅推荐；无 API Key 时自动降级为规则编排 |
+| 🤖 AI Agent | 6 个模块 | 多工具规划、上下文追问、跨模块对比、具体餐厅推荐、流式输出；显示 AI 或本地分析来源 |
 
 ## 几个关键结论
 
@@ -30,6 +30,7 @@ FastAPI + Pandas + Scikit-learn + ECharts 的一体化数据分析平台：约 1
 ```
 data_platform/
 ├── app.py                  # FastAPI 入口：页面 + JSON API + Agent
+├── agent_runtime.py        # 异步模型调用、工具规划、流式事件与诊断日志
 ├── analysis/               # 纯计算分析层（无 HTML / 无绘图）
 │   ├── data.py             # 数据加载缓存 + JSON 序列化
 │   ├── food.py
@@ -70,7 +71,8 @@ data_platform/
 | `GET /api/loan` | ROC/PR、阈值、校准、重要性、分群 |
 | `GET /api/rental` | 房型、区域、面积、配套、月度趋势、地图抽样 |
 | `GET /api/jobs` | 薪资、城市、经验、学历、公司、岗位族 |
-| `POST /api/agent/chat` | `{message, history}` → 多轮工具编排；`params` 支持推荐筛选 |
+| `POST /api/agent/chat` | 兼容 JSON 接口；返回 `reply / tools / source / request_id / elapsed_ms / fallback_reason` |
+| `POST /api/agent/chat/stream` | 同样的 `{message, history}` 输入；逐行 JSON，事件为 `status / delta / heartbeat / done` |
 
 ## 全栈平台的 AI Agent：工具与上下文
 
@@ -78,9 +80,12 @@ data_platform/
 
 - **按字段拆工具**：例如 `loan.thresholds`、`retention.channels`、`rental.rent_types`、`food.recommend`，而不是「每个图表一个工具」。
 - **具体餐厅推荐**：全栈平台的 `food.recommend` 支持区域、菜系、价格四类筛选条件：`district / cuisine / min_price / max_price`。默认只在「评分非空 + 评论数 ≥ 50」的 3,310 家店里推荐，避免 1 条评论的 5.0 分；样本不足时依次放宽到 10 条评论、只要评分非空，并在返回里标 `relaxed`。
-- **推荐兜底**：用户明确要「推荐一家餐厅」时，如果 LLM 想直接收尾而不调工具，代码会强制先调用一次 `food.recommend`，保证回答落到具体店名、区域、人均、评分和评论数。
+- **推荐约束**：推荐请求必须经过 `food.recommend`，保留模型提取的区域、菜系和预算；缺少推荐计划时明确降级，不把未经查询的模型回答当作数据推荐。
 - **历史隔离（多轮对话）**：多轮历史只用于理解「它 / 这个 / 再按城市拆一下」这类指代；模块识别以当前问题为准，只有当前问题没提模块时，才继承最近一条带模块的历史，避免前面问过租房、后面每个问题都带租房，导致回答串模块。
-- **降级一致**：LLM 失败或未配置 Key 时降级到规则引擎，工具标签和最终回答保持一致；DeepSeek 调用 45 秒超时，失败重试一次。
+- **减少等待**：常见问候与致谢直接回复；多个分析维度一次规划，最多执行 3 个工具。正常数据问题通常只需一次规划请求和一次答案请求，取代原先多轮规划。规划启用 JSON 输出，最终答案使用上游流式响应。
+- **异步与取消**：用 HTTPX 异步请求，数据工具在线程中执行，等待大模型时不会堵住其他页面请求。前端显示真实处理阶段、等待秒数和逐步生成的正文；“停止”会取消请求。已启动的同步数据计算线程不能强行中止。
+- **有界等待**：连接超时 5 秒，上游空闲读取超时默认 20 秒，整轮处理预算默认 45 秒。仅快速返回的 429/500/502/503/504 重试一次；认证、余额、权限错误及超时不重试。兜底最多另外等待 8 秒；浏览器 120 秒上限还包括免费实例的冷启动。
+- **降级一致**：模型失败、JSON 解析失败、流式中断都记录原因并返回本地分析；页面明确标记来源，失败前的部分模型正文会被完整替换，不拼接为成功回答。
 
 ## 本地运行
 
@@ -102,3 +107,41 @@ python app.py
 - 餐饮、游戏评论为公开数据集；租房与招聘数据已复制到 `data/`，clone 后可直接运行。
 - 留存与贷款为**模拟数据**：生成机制在 `analysis/retention.py`、`analysis/loan.py` 中显式写明，指标可复现（随机种子固定）。
 - 租房与招聘数据分布过于均匀/集中，存在合成或抓取偏差，模块内已标注哪些结论不能外推。
+
+
+## AI 调用日志与部署
+
+本地修改不会自动更新线上服务。提交并推送代码到 Render 连接的 GitHub 分支后，部署新版本；构建仍需 `pip install -r requirements.txt`，新版本增加了 HTTPX 依赖。启动命令仍为 `python app.py`。
+
+Render 的 Environment 必须配置 `DEEPSEEK_KEY`，不能将 `.env` 或密钥提交到 Git。可选环境变量：
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | 模型名称 |
+| `DEEPSEEK_READ_TIMEOUT` | `20` | 上游空闲读取超时秒数 |
+| `AGENT_TIMEOUT_SECONDS` | `45` | 规划、重试、取数、生成的整轮处理预算 |
+| `DEEPSEEK_MAX_TOKENS` | `800` | 每次模型请求的输出 token 上限 |
+
+日志直接输出到服务标准错误流，在 Render Logs 中可见。以 `request_id` 关联同一轮对话，关注 `llm_response` 的 `status`、`agent_fallback` 的 `reason`，以及 `agent_done` 的 `source / elapsed_ms`。日志不记录 API Key、认证头、问题正文、模型正文或上游响应正文。
+
+典型事件包括 `agent_start`、`llm_request`、`llm_response`、`llm_first_text`、`tool_done`、`llm_parse_failure`、`agent_timeout`、`agent_fallback`、`agent_done`。例如（仅示例）：
+
+```json
+{"event":"llm_response","request_id":"example","phase":"plan","attempt":1,"status":401,"elapsed_ms":300}
+{"event":"agent_fallback","request_id":"example","reason":"http_401"}
+```
+
+常见兜底原因：`missing_key`、`http_401`、`http_402`、`http_403`、`http_429`、`upstream_timeout`、`total_timeout`、`network_error`、`invalid_json`、`invalid_plan`、`incomplete_stream`。浏览器最终结果的 `source` 为 `llm`（模型）、`rules`（本地规则）、`local`（快捷回复）或 `error`。
+
+免费 Render 实例从休眠唤醒的时间发生在应用接收请求之前，以上优化不能消除冷启动；页面的模式提示也仅表示配置了非空密钥，不是上游连通性检查。
+
+## AI 模块验证
+
+不调用真实模型的自动测试：
+
+```bash
+python -m unittest discover -s tests -v
+node tests/test_agent_frontend.cjs
+```
+
+覆盖快捷回复、无密钥、401、超时、短暂 HTTP 故障重试、JSON 解析、批量工具规划、推荐筛选、流式中断、整轮预算、请求取消、并发等待、旧接口兼容，以及前端 UTF-8 分块、历史记录、兜底替换与停止操作。
