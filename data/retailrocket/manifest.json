@@ -1,0 +1,26 @@
+{
+  "dataset": "Retailrocket",
+  "source_type": "mysql_export_snapshot",
+  "is_live": false,
+  "source_url": "https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset",
+  "analysis_url": "https://github.com/overlxrd123/retailrocket-business-analysis",
+  "license": "CC BY-NC-SA 4.0",
+  "timezone": "UTC",
+  "snapshot_imported_at": "2026-11-07T12:47:07.892572+00:00",
+  "verified_overview": {
+    "visitors": 1407580,
+    "note": "访客全期去重数来自已核对的visitor_summary；每日人数不可相加替代。"
+  },
+  "sha256": {
+    "daily_metrics_mysql.csv": "8cb1413423e74a212af5731785bdb4876378a40a8d71a64c9e3d096b8cc05edc",
+    "weekday_metrics_mysql.csv": "e19df644f01207db4a42daf847c818d5e321b961af844c6fcc57a99290769376",
+    "july_weekend_comparison_mysql.csv": "14f534dba79edc030f5647090294fe81f49c44fe2defcf0543582902cf115ae6",
+    "july_hourly_mysql.csv": "10802350488689d276e523445baf8e8322c2b5e5d7a1d1faafe0e22056988ecc",
+    "funnel_metrics_mysql.csv": "15277a1ecfe98c72a8f3f6cf7fb1877f0555d7bbabad700c3a6930c0cac849a8",
+    "funnel_windows_mysql.csv": "2238b2968fab456baa53b659d65c5acb5bf82797145dfa74f7f6d7e34384322a",
+    "retention_metrics_mysql.csv": "fbef5630ee349c777afa1bac600cf177b5da8d2d8295c61be729d15666dfe448",
+    "weekly_retention_mysql.csv": "1a346f0fb39721fba4fca26ad0ef412e837b20b6e04104aa776f598ca56ec265",
+    "category_metrics_mysql.csv": "91f513b72a67aa87e45aba98b9dc97c1b7d860a179745cb61c55b1fb96c79fbb",
+    "availability_metrics_mysql.csv": "154c3372c794807c34ab867f04d6c7f9f5ff2472b454b55ac793cf2d55a6935a"
+  }
+}

@@ -34,7 +34,7 @@
       <div class="page-head">
         <div class="eyebrow">Module 01 · Restaurant</div>
         <h1>北京餐饮：先把「0 元」剔掉，再谈人均</h1>
-        <p>44,512 家店铺中有 13,309 家人均消费记为 0——这是未采集，不是免费。有效样本 31,203 家，人均中位数 ¥67。本模块同时检查评分覆盖、评论集中度与米其林分层。</p>
+        <p>44,512 家店铺中有 13,309 家人均消费记为 0——这是未采集，不是免费。有效样本 31,203 家，人均中位数 ¥67。本模块同时检查评分覆盖、评论集中度与原始推荐标签分层。</p>
       </div>
 
       ${C.kpis([
@@ -68,7 +68,7 @@
         </div>`)}
 
       <div class="grid-2">
-        ${C.panel('米其林分层', '层级越高店铺越少；铂金/钻石/黑钻合计仅 23 家，中位人均超过 ¥1,000。', C.chartBox('michelinChart') + C.table(['层级', '店铺数', '中位人均', '均值', '评分'], michelinRows))}
+        ${C.panel('原始推荐标签分层', '标签来源未核实，不代表官方米其林评级；铂金/钻石/黑钻合计仅 23 家，中位人均超过 ¥1,000。', C.chartBox('michelinChart') + C.table(['层级', '店铺数', '中位人均', '均值', '评分'], michelinRows))}
         ${C.panel('夜宵营业', `营业时间可解析的 ${C.fmt(d.late_night.parsed_stores)} 家店中，${C.pct(d.late_night.late_pct_of_parsed)} 在 23:00 后仍营业；夜宵店中位人均 ¥${d.late_night.late_median_price}。`, C.chartBox('lateChart'))}
       </div>
 

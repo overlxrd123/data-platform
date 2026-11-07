@@ -1,4 +1,4 @@
-"""全栈数据分析平台 — 六个分析模块 + 多轮工具编排 Agent。
+"""全栈数据分析平台 — 七个分析模块 + 多轮工具编排 Agent。
 
 页面只负责渲染，所有业务口径集中在 analysis/ 下；页面、JSON API 与 Agent
 共用同一份分析结果，避免同一个指标出现两套算法。
@@ -7,16 +7,15 @@ import json
 import os
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from agent_runtime import Agent
 from fastapi.staticfiles import StaticFiles
 
+from analysis.portfolio import get_movies_analysis, get_survey_analysis, get_housing_analysis
 from analysis.food import get_food_analysis, recommend_food
-from analysis.game import get_game_analysis
-from analysis.retention import get_retention_analysis
-from analysis.loan import get_loan_analysis
 from analysis.rental import get_rental_analysis
 from analysis.jobs import get_jobs_analysis
+from analysis.retailrocket import get_retailrocket_analysis
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -45,46 +44,65 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
 
-MODULES = [
-    {
-        "slug": "food", "icon": "🍽️", "title": "北京餐饮",
-        "en": "RESTAURANT", "count": "44,512", "accent": "#22d3ee",
-        "desc": "把 0 元人均识别为缺失值后，重新计算价格带、菜系、区域与评分；顺带检查评论集中度和米其林分层。",
-        "tags": ["缺失值口径", "评论集中度", "价格分层"],
-    },
-    {
-        "slug": "game", "icon": "🎮", "title": "游戏评论",
-        "en": "GAME REVIEWS", "count": "2,531", "accent": "#8b5cf6",
-        "desc": "VADER 文本情感与用户评分的对照：一致率只有 61.1%，玩家嘴上夸、手上打低分的情况真实存在。",
-        "tags": ["VADER", "TF-IDF", "主题词典"],
-    },
-    {
-        "slug": "retention", "icon": "📈", "title": "用户留存",
-        "en": "RETENTION", "count": "20,301", "accent": "#34d399",
-        "desc": "53 个注册周队列、8 周留存矩阵；首周流失 49.1%，渠道质量差异远大于设备差异。",
-        "tags": ["队列分析", "条件流失", "渠道质量"],
-    },
-    {
-        "slug": "loan", "icon": "🏦", "title": "贷款违约",
-        "en": "CREDIT RISK", "count": "5,000", "accent": "#f59e0b",
-        "desc": "随机森林 AUC 0.939、KS 0.735；按业务成本推导最优阈值 0.25，而不是默认的 0.5。",
-        "tags": ["ROC / PR", "阈值收益", "概率校准"],
-    },
-    {
-        "slug": "rental", "icon": "🏘️", "title": "北京租房",
-        "en": "BEIJING RENTAL", "count": "35,082", "accent": "#60a5fa",
-        "desc": "整租与合租必须分开算；面积与单价的关系主要是除法效应，配套字段几乎没有解释力。",
-        "tags": ["分房型口径", "除法效应", "字段质量"],
-    },
-    {
-        "slug": "jobs", "icon": "💼", "title": "数据岗招聘",
-        "en": "DATA JOBS", "count": "3,523", "accent": "#f472b6",
-        "desc": "解析混合格式薪资并剔除 49.9% 的伪数据岗；算法 25,000，数据分析 12,500。",
-        "tags": ["薪资解析", "岗位去噪", "控制变量"],
-    },
-]
+MODULES = [{'slug': 'food',
+  'icon': '🍽️',
+  'title': '北京餐饮',
+  'en': 'RESTAURANT',
+  'count': '44,512',
+  'accent': '#22d3ee',
+  'desc': '识别人均消费与评分缺失，分析价格带、菜系、区域和评论集中度；保留原始推荐标签的来源限制。',
+  'tags': ['缺失值口径', '评论集中度', '价格分层']},
+ {'slug': 'survey',
+  'icon': '🥤',
+  'title': '消费者调查',
+  'en': 'CONSUMER SURVEY',
+  'count': '1,453',
+  'accent': '#8b5cf6',
+  'desc': '麦当劳消费者问卷：品牌属性、好感分组、到访频率与年龄差异。',
+  'tags': ['品牌认知', '好感分组', '问卷分析']},
+ {'slug': 'housing',
+  'icon': '🏡',
+  'title': '美国房价',
+  'en': 'AMES HOUSING',
+  'count': '1,460',
+  'accent': '#34d399',
+  'desc': '美国Ames历史房屋成交售价：房屋特征、社区差异与独立留出验证；与北京月租金分别展示。',
+  'tags': ['美元成交价', '房屋特征', '留出验证']},
+ {'slug': 'movies',
+  'icon': '🎬',
+  'title': '国产电影',
+  'en': 'CHINESE MOVIES',
+  'count': '120',
+  'accent': '#f59e0b',
+  'desc': '国产电影历史样本：票房、双平台评分、类型筛选与各影片截止日期。',
+  'tags': ['类型多标签', '票房分布', '评分关联']},
+ {'slug': 'rental',
+  'icon': '🏘️',
+  'title': '北京租房',
+  'en': 'BEIJING RENTAL',
+  'count': '35,082',
+  'accent': '#60a5fa',
+  'desc': '整租与合租必须分开算；面积与单价的关系主要是除法效应，配套字段几乎没有解释力。',
+  'tags': ['分房型口径', '除法效应', '字段质量']},
+ {'slug': 'jobs',
+  'icon': '💼',
+  'title': '数据岗招聘',
+  'en': 'DATA JOBS',
+  'count': '3,523',
+  'accent': '#f472b6',
+  'desc': '解析混合格式薪资并剔除 49.9% 的伪数据岗；算法 25,000，数据分析 12,500。',
+  'tags': ['薪资解析', '岗位去噪', '控制变量']},
+ {'slug': 'retailrocket',
+  'icon': '🛒',
+  'title': '电商行为',
+  'en': 'RETAILROCKET',
+  'count': '2,756,101',
+  'accent': '#2dd4bf',
+  'desc': '真实电商行为：MySQL汇总快照，观察访问、购买漏斗与回访，明确属性未知和观察窗口。',
+  'tags': ['真实电商', '有序漏斗', '时间属性关联']}]
 
 MODULE_MAP = {m["slug"]: m for m in MODULES}
+PORTFOLIO_LOADERS = {"housing": get_housing_analysis, "movies": get_movies_analysis, "survey": get_survey_analysis}
 
 
 def _nav(active=""):
@@ -132,8 +150,8 @@ def cover():
 def home():
     cards = []
     for i, m in enumerate(MODULES):
-        simulated = m['slug'] in ('retention', 'loan')
-        source = '模拟数据' if simulated else '数据集分析'
+        simulated = False
+        source = "公开数据集"
         tags = ''.join(f'<span class="tag">{t}</span>' for t in m['tags'])
         cards.append(f"""<a class="module-card" href="/module/{m['slug']}" style="--accent:{m['accent']}">
           <div class="card-top"><span class="module-index">0{i+1} / {m['en']}</span><span class="source-badge {'simulated' if simulated else ''}">{source}</span></div>
@@ -143,18 +161,18 @@ def home():
     return f"""<!DOCTYPE html><html lang="zh-CN"><head>{_head("工作台")}</head><body>
     {_topbar()}
     <main class="container dashboard">
-      <section class="workspace-heading"><div><div class="eyebrow">OVERVIEW / 数据概览</div><h1>从数据出发，让洞察发生<span class="heading-dot">.</span></h1><p>六个业务场景，一个分析工作空间。选择数据集，探索指标背后的原因。</p></div><a class="btn" href="#datasets">浏览数据集 ↓</a></section>
+      <section class="workspace-heading"><div><div class="eyebrow">OVERVIEW / 数据概览</div><h1>从数据出发，让洞察发生<span class="heading-dot">.</span></h1><p>七个业务场景，一个分析工作空间。选择数据集，探索指标背后的原因。</p></div><a class="btn" href="#datasets">浏览数据集 ↓</a></section>
       <section class="overview-stats" aria-label="平台数据概览">
-        <div><span class="stat-caption">原始数据记录 <i>↗</i></span><strong>110,949<small>条</small></strong><span class="stat-foot">涵盖公开数据集与模拟样本</span></div>
-        <div><span class="stat-caption">业务分析场景 <i>◫</i></span><strong>06<small>个</small></strong><span class="stat-foot">消费 · 文本 · 增长 · 风控 · 租房 · 招聘</span></div>
-        <div><span class="stat-caption">数据来源构成 <i>▤</i></span><strong>4 <em>+</em> 2</strong><span class="stat-foot">4 个数据集 / 2 个模拟业务场景</span></div>
+        <div><span class="stat-caption">原始数据记录 <i>↗</i></span><strong>2,842,251<small>条</small></strong><span class="stat-foot">各模块主要样本数之和，记录单位不同</span></div>
+        <div><span class="stat-caption">业务分析场景 <i>◫</i></span><strong>07<small>个</small></strong><span class="stat-foot">消费 · 电影 · 国内外住房 · 招聘 · 电商</span></div>
+        <div><span class="stat-caption">数据来源构成 <i>▤</i></span><strong>07</strong><span class="stat-foot">公开历史样本，来源说明见各模块</span></div>
         <div><span class="stat-caption">分析方式 <i>✳</i></span><strong class="stat-text">可视化 + AI</strong><span class="stat-foot">图表探索与自然语言追问</span></div>
       </section>
       <section class="overview-row">
-        <div class="panel distribution-panel"><div class="panel-head"><div><h2>数据集规模分布</h2><p>各模块原始记录数 · 清洗后样本以模块页为准</p></div><span class="mini-label">6 DATASETS</span></div><div id="datasetChart" class="chart" style="height:245px" role="img" aria-label="六个数据集记录数对比"></div></div>
+        <div class="panel distribution-panel"><div class="panel-head"><div><h2>数据集规模分布</h2><p>各模块主要原始记录数 · 对数刻度 · 清洗后样本以模块页为准</p></div><span class="mini-label">7 DATASETS</span></div><div id="datasetChart" class="chart" style="height:245px" role="img" aria-label="七个数据集记录数对比"></div></div>
         <div class="assistant-card"><span class="assistant-symbol">✳</span><div class="eyebrow">YOUR ANALYSIS COPILOT</div><h2>带着问题，<br>发现数据的另一面。</h2><p>从选择分析工具到引用计算结果，<br>让一次提问成为探索的起点。</p><a class="btn primary" href="/agent">开始与数据对话 <span>↗</span></a><span class="assistant-note">支持上下文追问与跨模块对比</span></div>
       </section>
-      <section id="datasets"><div class="section-heading"><div><div class="eyebrow">EXPLORE / 开始探索</div><h2>选择你的分析场景</h2></div><label class="dataset-search"><span>⌕</span><input id="datasetSearch" type="search" placeholder="搜索场景、关键词…" aria-label="搜索分析场景"></label></div><div class="module-grid">{''.join(cards)}</div><p id="searchEmpty" class="search-empty" hidden>没有匹配的场景，试试“餐饮”“留存”或“薪资”。</p><div class="dataset-count" id="datasetCount" aria-live="polite">全部 6 个分析场景</div></section>
+      <section id="datasets"><div class="section-heading"><div><div class="eyebrow">EXPLORE / 开始探索</div><h2>选择你的分析场景</h2></div><label class="dataset-search"><span>⌕</span><input id="datasetSearch" type="search" placeholder="搜索场景、关键词…" aria-label="搜索分析场景"></label></div><div class="module-grid">{''.join(cards)}</div><p id="searchEmpty" class="search-empty" hidden>没有匹配的场景，试试“餐饮”“留存”或“薪资”。</p><div class="dataset-count" id="datasetCount" aria-live="polite">全部 7 个分析场景</div></section>
       <section class="method-strip"><div><span>01</span><b>检查数据质量</b><small>识别缺失值与样本偏差</small></div><div><span>02</span><b>探索业务指标</b><small>用交互图表理解分布与差异</small></div><div><span>03</span><b>形成可追溯结论</b><small>引用统计结果，标明适用边界</small></div></section>
     </main>{_footer()}<script src="/static/echarts.min.js"></script><script src="/static/common.js"></script><script src="/static/workspace.js"></script></body></html>"""
 
@@ -173,7 +191,7 @@ def _module_page(slug: str):
   {_footer()}
   <script src="/static/echarts.min.js"></script>
   <script src="/static/common.js"></script>
-  <script src="/static/{slug}.js"></script>
+  <script src="/static/{'portfolio' if slug in PORTFOLIO_LOADERS else slug}.js"></script>
 </body></html>"""
 
 
@@ -182,19 +200,10 @@ def page_food():
     return _module_page("food")
 
 
-@app.get("/module/game", response_class=HTMLResponse)
-def page_game():
-    return _module_page("game")
 
 
-@app.get("/module/retention", response_class=HTMLResponse)
-def page_retention():
-    return _module_page("retention")
 
 
-@app.get("/module/loan", response_class=HTMLResponse)
-def page_loan():
-    return _module_page("loan")
 
 
 @app.get("/module/rental", response_class=HTMLResponse)
@@ -208,14 +217,13 @@ def page_jobs():
 
 
 # ===== Agent =====
-MODULE_LABELS = {
-    "food": "北京餐饮",
-    "game": "游戏评论",
-    "retention": "用户留存",
-    "loan": "贷款违约",
-    "rental": "北京租房",
-    "jobs": "数据岗招聘",
-}
+MODULE_LABELS = {'food': '北京餐饮',
+ 'survey': '消费者调查',
+ 'housing': '美国房价',
+ 'movies': '国产电影',
+ 'rental': '北京租房',
+ 'jobs': '数据岗招聘',
+ 'retailrocket': '电商行为'}
 
 FOCUS_ALIASES = {
     "价格": "price", "人均": "price", "消费": "price", "贵": "price",
@@ -238,61 +246,57 @@ FOCUS_ALIASES = {
     "规模": "company", "趋势": "trend", "整租": "rent_types", "合租": "rent_types",
 }
 
-MODULE_KEYS = {
-    "food": ["餐饮", "菜系", "餐厅", "美食", "人均消费", "米其林", "夜宵", "吃饭", "餐馆", "饭馆"],
-    "game": ["游戏", "评论", "情感", "metacritic", "评分"],
-    "retention": ["留存", "流失", "队列", "注册用户", "渠道", "拉新"],
-    "loan": ["贷款", "违约", "风控", "信贷", "坏账", "auc", "ks"],
-    "rental": ["租房", "租金", "房源", "整租", "合租", "房东"],
-    "jobs": ["招聘", "岗位", "薪资", "求职", "就业", "数据岗", "月薪"],
-}
-# 模块专属词优先，避免「餐饮评分」同时命中 game 的「评分」
-PRIMARY_KEYS = {
-    "food": ["餐饮", "餐厅", "菜系", "美食", "米其林", "夜宵", "吃饭", "餐馆", "饭馆"],
-    "game": ["游戏", "metacritic"],
-    "retention": ["留存", "流失", "队列", "注册用户", "拉新"],
-    "loan": ["贷款", "违约", "风控", "信贷", "坏账", "auc", "ks"],
-    "rental": ["租房", "租金", "房源", "整租", "合租", "房东"],
-    "jobs": ["招聘", "求职", "就业", "数据岗", "月薪", "薪资"],
-}
+MODULE_KEYS = {'retailrocket': ['retailrocket', '电商', '加购', '购物车', '购买', '可售', '漏斗', '留存', '回访', '队列'],
+ 'food': ['餐饮', '菜系', '餐厅', '美食', '人均消费', '夜宵', '吃饭', '餐馆', '饭馆'],
+ 'survey': ['麦当劳', '问卷', '品牌', '消费者', '好感'],
+ 'housing': ['美国', 'ames', '房价', '成交', '售价', '房屋质量', '预测误差'],
+ 'movies': ['电影', '票房', '豆瓣', '猫眼', '导演', '影片'],
+ 'rental': ['北京租房', '租房', '租金', '房源', '整租', '合租', '房东'],
+ 'jobs': ['招聘', '岗位', '薪资', '求职', '就业', '数据岗', '月薪']}
+# 模块专属词优先，当前问题先于历史上下文
+PRIMARY_KEYS = {'retailrocket': ['retailrocket', '电商', '加购', '购物车', '购买', '可售', '漏斗', '留存', '回访', '队列'],
+ 'food': ['餐饮', '菜系', '餐厅', '美食', '人均消费', '夜宵', '吃饭', '餐馆', '饭馆'],
+ 'survey': ['麦当劳', '问卷', '品牌', '消费者', '好感'],
+ 'housing': ['美国', 'ames', '房价', '成交', '售价', '房屋质量', '预测误差'],
+ 'movies': ['电影', '票房', '豆瓣', '猫眼', '导演', '影片'],
+ 'rental': ['北京租房', '租房', '租金', '房源', '整租', '合租', '房东'],
+ 'jobs': ['招聘', '岗位', '薪资', '求职', '就业', '数据岗', '月薪']}
 
-AGENT_SYSTEM = """你是「全栈数据分析平台」的分析 Agent，服务对象是求职者和业务同学。
-你可以调用 6 个分析模块的工具，每次调用返回该模块的完整统计结果。
+AGENT_SYSTEM = ('你是数据分析平台的中文分析助手。必须先调用工具，再引用具体计算结果回答。\n'
+ '工具module可选：food北京餐饮；survey麦当劳消费者问卷；housing美国Ames成交售价；movies国产电影；rental北京租房；jobs招聘；retailrocket电商行为及真实回访。\n'
+ 'food '
+ 'focus=overview/price/cuisine/rating/district/michelin/late_night/recommend；推荐用params传district/cuisine/min_price/max_price，必须返回具体店名与样本口径。\n'
+ 'survey focus=overview/attributes/segments/visits/ages；housing '
+ 'focus=overview/neighborhoods/quality/validation；movies focus=overview/genres/ratings/movies。\n'
+ 'rental focus=overview/districts/area/amenities/rent_types/attributes/trend；jobs '
+ 'focus=overview/cities/families/experience/education/company。\n'
+ 'retailrocket focus=overview/trend/funnel/retention/products。首次观察不是注册，精确第N日回访不是N日内回访。\n'
+ '美国住房为美元/套成交售价、面积平方英尺，北京住房为人民币/月租金、面积平方米；不得直接比较价格高低。北京月租与美国售价不是同一个指标。\n'
+ '消费者问卷不是中国整体市场，电影各影片截止日不同；不将相关性当因果。food原始推荐标签不称官方米其林评级。\n'
+ '来源说明简洁表述为：作者从和鲸社区、天池等公开数据社区下载整理。美国房价与Retailrocket注明Kaggle。不要追加下载链接缺失或核实状态的说明，也不要夸大为官方授权或逐条验证。旧贷款、游戏评论、模拟注册留存已撤下。\n'
+ '历史对话仅用于理解指代，优先回答当前问题。一次最多规划3个工具。回答中文、简洁，引用来源与适用边界，不编造。\n'
+ '只输出JSON：{"action":"call","calls":[{"module":"housing","focus":"validation"}]}；无需取数则{"action":"final","reply":"回复"}。')
 
-工具列表（module + focus）：
-- food：北京餐饮。focus = overview / price / cuisine / rating / district / michelin / late_night / recommend
-  recommend 支持可选参数：district（如「丰台区」）、cuisine（如「火锅」）、min_price、max_price（元）
-- game：游戏评论。focus = overview / sentiment / themes / platforms / keywords / polarization
-- retention：用户留存。focus = overview / channels / devices / cohorts / hazard
-- loan：贷款违约。focus = overview / metrics / thresholds / calibration / importance / segments
-- rental：北京租房。focus = overview / districts / area / amenities / rent_types / attributes / trend
-- jobs：数据岗招聘。focus = overview / cities / families / experience / education / company
 
-规则：
-1. 一次规划回答当前问题所需的工具，最多 3 个；同一工具不要重复选择。
-2. 将工具计划放在 calls 数组中。工具结果将交给后续模型生成回答，你不必规划多轮调用。
-3. 回答必须引用工具返回的具体数字，不要编造。
-4. 如果用户在做比较，先分别取数，再给结论。
-5. 用户问「推荐一家 / 吃什么 / 哪家好吃」时，必须调用 food + recommend，
-   给出至少 3 家具体店名，并带区域、菜系、人均、评分、评论数；
-   不要只回答「北京餐饮」或模块概览。
-6. 调用 food + recommend 时，把用户提到的区域、菜系、预算放进 params，
-   例如「丰台区 100 以内」→ {"district":"丰台区","max_price":100}。
-   工具返回什么店就推荐什么店，不要自己编造店名。
-7. 只回答当前问题。历史对话只用于理解「它 / 这个 / 再按城市拆一下」这类指代；
-   不要把历史里问过的其他模块带进本轮回答，也不要无故调用其他模块的工具。
-8. 用中文回答，简洁，先结论后依据。
-
-如无需查询数据，可以直接 final。数据结论必须先选择工具，不要凭记忆回答。
-只输出 JSON，格式示例：
-{"action":"call","calls":[{"module":"food","focus":"price"}]}
-{"action":"call","calls":[{"module":"food","focus":"recommend","params":{"district":"丰台区","max_price":100}}]}
-{"action":"final","reply":"最终回答"}
-"""
+def _chat_value(obj):
+    """问答使用简洁来源文案，模块数据及完整说明保持原样。"""
+    if isinstance(obj, dict):
+        return {k: _chat_value(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_chat_value(v) for v in obj]
+    if isinstance(obj, str):
+        if "作者从和鲸社区、天池等公开数据社区下载整理" in obj:
+            return "数据来源：作者从和鲸社区、天池等公开数据社区下载整理。"
+        return (obj.replace("（标签来源未核实）", "")
+                   .replace("120部电影的选样规则未保留，", "120部电影是当前分析样本，")
+                   .replace("调查时间与抽样细节未在本地文件中保留", "统计仅描述当前调查样本")
+                   .replace("发布时间口径及采集节奏未核实，", "当前样本的发布时间分布集中，")
+                   .replace("原始推荐标签分层（非已核实官方米其林评级）", "原始推荐标签分层（非官方米其林评级）"))
+    return obj
 
 
 def _json_text(obj, limit=3200):
-    s = json.dumps(obj, ensure_ascii=False, default=str, separators=(",", ":"))
+    s = json.dumps(_chat_value(obj), ensure_ascii=False, default=str, separators=(",", ":"))
     return s if len(s) <= limit else s[:limit] + "...(截断)"
 
 
@@ -307,6 +311,24 @@ def _agent_tool(module, focus="overview", params=None):
     """返回给 LLM 的紧凑工具结果（字符串）。"""
     module = str(module or "").strip().lower()
     focus = _normalize_focus(focus)
+
+    if module in PORTFOLIO_LOADERS:
+        d = PORTFOLIO_LOADERS[module]()
+        fields = {"ratings": ["correlations"], "validation": ["metrics", "validation"],
+                  "segments": ["segments", "profiles"]}.get(focus, [focus])
+        payload = {k: d[k] for k in ("overview", "insights", "data_notes", "source")}
+        for key in fields:
+            if key in d:
+                payload[key] = d[key][:20] if isinstance(d[key], list) else d[key]
+        return _json_text(payload, limit=10000)
+
+    if module == "retailrocket":
+        d = get_retailrocket_analysis()
+        fields = {"trend": ["weekday", "july"], "funnel": ["funnel", "windows"], "retention": ["retention"], "products": ["coverage", "availability"]}
+        payload = {"overview": d["overview"], "insights": d["insights"], "data_notes": d["data_notes"], "is_live": False}
+        for key in fields.get(focus, []):
+            payload[key] = d[key]
+        return _json_text(payload, limit=8000)
 
     if module == "food":
         d = get_food_analysis()
@@ -344,63 +366,6 @@ def _agent_tool(module, focus="overview", params=None):
             payload = {"recommendations": rec, "data_notes": d["data_notes"][:2]}
         else:
             payload = {"overview": d["overview"], "insights": d["insights"][:4]}
-        return _json_text(payload)
-
-    if module == "game":
-        d = get_game_analysis()
-        if focus == "sentiment":
-            payload = {"overview": d["overview"], "sentiment_vs_rating": d["sentiment_vs_rating"],
-                       "insights": d["insights"][:4]}
-        elif focus == "themes":
-            payload = {"themes": d["themes"], "insights": d["insights"][:4]}
-        elif focus == "platforms":
-            payload = {"platforms": d["platforms"], "polarization": d["polarization"],
-                       "insights": d["insights"][:4]}
-        elif focus == "keywords":
-            payload = {"keywords": d["keywords"],
-                       "insights": d["insights"][:4]}
-        else:
-            payload = {"overview": d["overview"], "rating_distribution": d["rating_distribution"],
-                       "insights": d["insights"][:4]}
-        return _json_text(payload)
-
-    if module == "retention":
-        d = get_retention_analysis()
-        if focus == "channels":
-            payload = {"channels": d["channels"], "insights": d["insights"][:4]}
-        elif focus == "devices":
-            payload = {"devices": d["devices"], "insights": d["insights"][:4]}
-        elif focus == "cohorts":
-            payload = {"overview": d["overview"],
-                       "cohorts_first": d["cohorts"][:6],
-                       "cohorts_last": d["cohorts"][-6:],
-                       "cohort_trend": d["cohort_trend"][::4],
-                       "insights": d["insights"][:4]}
-        elif focus == "hazard":
-            payload = {"hazard": d["hazard"], "average_curve": d["average_curve"],
-                       "insights": d["insights"][:4]}
-        else:
-            payload = {"overview": d["overview"], "average_curve": d["average_curve"],
-                       "insights": d["insights"][:4]}
-        return _json_text(payload)
-
-    if module == "loan":
-        d = get_loan_analysis()
-        if focus == "thresholds":
-            payload = {"overview": d["overview"], "metrics": d["metrics"],
-                       "thresholds": d["thresholds"], "insights": d["insights"][:5]}
-        elif focus == "calibration":
-            payload = {"calibration": d["calibration"], "insights": d["insights"][:5]}
-        elif focus == "importance":
-            payload = {"feature_importance": d["feature_importance"], "insights": d["insights"][:4]}
-        elif focus == "segments":
-            payload = {"segments": d["segments"], "insights": d["insights"][:4]}
-        elif focus == "metrics":
-            payload = {"overview": d["overview"], "metrics": d["metrics"],
-                       "cv_scores": d["cv_scores"], "insights": d["insights"][:5]}
-        else:
-            payload = {"overview": d["overview"], "metrics": d["metrics"],
-                       "insights": d["insights"][:5]}
         return _json_text(payload)
 
     if module == "rental":
@@ -465,6 +430,15 @@ def _infer_foci(module, text):
     for word, focus in FOCUS_ALIASES.items():
         if word.lower() in text and focus not in foci:
             foci.append(focus)
+    if module == "retailrocket":
+        return [focus for word, focus in [("漏斗", "funnel"), ("加购", "funnel"), ("窗口", "funnel"), ("留存", "retention"), ("回访", "retention"), ("可售", "products"), ("类别", "products"), ("趋势", "trend"), ("周末", "trend")] if word in text]
+    if module in PORTFOLIO_LOADERS:
+        words = {
+            "housing": [("社区", "neighborhoods"), ("区域", "neighborhoods"), ("质量", "quality"), ("误差", "validation"), ("模型", "validation"), ("预测", "validation")],
+            "movies": [("类型", "genres"), ("评分", "ratings"), ("票房", "movies")],
+            "survey": [("属性", "attributes"), ("认知", "attributes"), ("分组", "segments"), ("好感", "segments"), ("频率", "visits"), ("到访", "visits"), ("年龄", "ages")],
+        }[module]
+        return [focus for word, focus in words if word in text]
     # 同一别名在不同模块下指向不同的工具名
     if module == "rental" and "district" in foci:
         foci[foci.index("district")] = "districts"
@@ -478,10 +452,9 @@ def _infer_focus(module, text):
 
 def _module_data(module):
     return {
+        "retailrocket": get_retailrocket_analysis,
         "food": get_food_analysis,
-        "game": get_game_analysis,
-        "retention": get_retention_analysis,
-        "loan": get_loan_analysis,
+        **PORTFOLIO_LOADERS,
         "rental": get_rental_analysis,
         "jobs": get_jobs_analysis,
     }[module]()
@@ -559,7 +532,7 @@ def _food_answer(foci):
         tools.append("food.rating")
 
     if "michelin" in foci:
-        lines.append("米其林分层：" + "、".join(
+        lines.append("原始推荐标签分层（非已核实官方米其林评级）：" + "、".join(
             f"{x['tier']} {x['stores']} 家（中位 {_fmt_money(x['median_price'])}）"
             for x in d["michelin"]))
         tools.append("food.michelin")
@@ -599,151 +572,10 @@ def _food_answer(foci):
     return lines, tools
 
 
-def _game_answer(foci):
-    d = get_game_analysis()
-    o = d["overview"]
-    lines, tools = [], []
-
-    if "rating" in foci:
-        p = d["polarization"]
-        lines.append(
-            f"评分中位 {o['median_rating']:.1f}/10，均值 {o['avg_rating']:.2f}/10；"
-            f"极端评分（0–3 或 8–10）占 {_fmt_pct(p['extreme_pct'])}，"
-            f"中间分段仅 {_fmt_pct(p['middle_pct'])}")
-        tools.append("game.rating")
-
-    if "sentiment" in foci:
-        lines.append(
-            f"VADER 文本情感：正面 {_fmt_pct(o['positive_pct'])}、负面 {_fmt_pct(o['negative_pct'])}、"
-            f"中性 {_fmt_pct(o['neutral_pct'])}；与用户评分一致率 {_fmt_pct(o['agreement_pct'])}，"
-            f"相关系数 {o['text_rating_corr']}")
-        tools.append("game.sentiment")
-
-    if "platforms" in foci:
-        ps = d["platforms"]
-        pos = max(ps, key=lambda x: x["positive_pct"])
-        neg = max(ps, key=lambda x: x["negative_pct"])
-        pol = max(ps, key=lambda x: x["polarization_pct"])
-        lines.append(
-            f"文本正面率最高 {pos['name']} {_fmt_pct(pos['positive_pct'])}；"
-            f"负面率最高 {neg['name']} {_fmt_pct(neg['negative_pct'])}；"
-            f"极化最高 {pol['name']} {_fmt_pct(pol['polarization_pct'])}")
-        tools.append("game.platforms")
-
-    if "themes" in foci:
-        themes = d["themes"]
-        top = max(themes, key=lambda x: x["mention_pct"])
-        neg = max(themes, key=lambda x: x["negative_pct"])
-        lines.append(
-            f"提及最多：{top['label']} {_fmt_pct(top['mention_pct'])}；"
-            f"负面率最高：{neg['label']} {_fmt_pct(neg['negative_pct'])}")
-        tools.append("game.themes")
-
-    if "keywords" in foci:
-        lines.append("正面高频词：" + "、".join(
-            x["term"] for x in d["keywords"]["positive"][:5]))
-        lines.append("负面高频词：" + "、".join(
-            x["term"] for x in d["keywords"]["negative"][:5]))
-        tools.append("game.keywords")
-
-    if "polarization" in foci:
-        p = d["polarization"]
-        lines.append(
-            f"两极分化：极端评分占 {_fmt_pct(p['extreme_pct'])}；"
-            f"好评率（8–10）{_fmt_pct(p['top_box_pct'])}，"
-            f"差评率（0–3）{_fmt_pct(p['bottom_box_pct'])}")
-        tools.append("game.polarization")
-
-    return lines, tools
 
 
-def _retention_answer(foci):
-    d = get_retention_analysis()
-    o = d["overview"]
-    lines, tools = [], []
-
-    if "channels" in foci:
-        channels = sorted(d["channels"], key=lambda x: -x["values"][4])
-        lines.append("渠道 W4 留存：" + "、".join(
-            f"{x['name']} {_fmt_pct(x['values'][4])}（用户占 {_fmt_pct(x['share_pct'])}）"
-            for x in channels))
-        tools.append("retention.channels")
-
-    if "devices" in foci:
-        lines.append("设备 W4 留存：" + "、".join(
-            f"{x['name']} {_fmt_pct(x['values'][4])}" for x in d["devices"]))
-        tools.append("retention.devices")
-
-    if "hazard" in foci:
-        lines.append(
-            f"首周流失 {_fmt_pct(o['first_week_churn'])}；"
-            f"第 2 周条件流失 {_fmt_pct(d['hazard'][1]['churn_pct'])}，之后快速下降")
-        tools.append("retention.hazard")
-
-    if "cohorts" in foci:
-        lines.append(
-            f"{o['cohorts']} 个注册周队列；W4 留存从早期 {_fmt_pct(o['cohort_w4_early'])} "
-            f"升至近期 {_fmt_pct(o['cohort_w4_late'])}"
-            f"（+{o['cohort_w4_late'] - o['cohort_w4_early']:.1f}pp）")
-        tools.append("retention.cohorts")
-
-    if not lines:
-        lines, tools = d["insights"][:4], ["retention.overview"]
-    return lines, tools
 
 
-def _loan_answer(foci):
-    d = get_loan_analysis()
-    o, m = d["overview"], d["metrics"]
-    lines, tools = [], []
-
-    if "thresholds" in foci:
-        best = min(d["thresholds"], key=lambda x: abs(x["threshold"] - o["best_threshold"]))
-        mid = min(d["thresholds"], key=lambda x: abs(x["threshold"] - 0.5))
-        lines.append(
-            f"收益最优阈值 {best['threshold']:.2f}：通过率 {_fmt_pct(best['approval_pct'])}、"
-            f"坏账率 {_fmt_pct(best['bad_rate_pct'])}、违约召回 "
-            f"{_fmt_pct(best['default_recall_pct'])}、测试集总期望收益 "
-            f"{_fmt_money(best['expected_profit'])}")
-        lines.append(
-            f"对比默认 0.50：通过率 {_fmt_pct(mid['approval_pct'])}、"
-            f"坏账率 {_fmt_pct(mid['bad_rate_pct'])}、违约召回 "
-            f"{_fmt_pct(mid['default_recall_pct'])}、总收益 "
-            f"{_fmt_money(mid['expected_profit'])}——坏账率翻倍，收益被坏账吃掉")
-        tools.append("loan.thresholds")
-
-    if "metrics" in foci:
-        lines.append(
-            f"随机森林 AUC {o['auc_rf']:.3f}（逻辑回归 {o['auc_lr']:.3f}）、"
-            f"KS {o['ks']:.3f}、PR-AUC {m['pr_auc']:.3f}；默认阈值精确率 "
-            f"{_fmt_pct(m['precision'] * 100)}、召回率 {_fmt_pct(m['recall'] * 100)}")
-        tools.append("loan.metrics")
-
-    if "calibration" in foci:
-        lines.append("校准曲线 10 个分箱；高分段预测概率与实际违约率基本贴合，"
-                     "模型输出可以直接当概率使用")
-        tools.append("loan.calibration")
-
-    if "importance" in foci:
-        imp = sorted(d["feature_importance"],
-                     key=lambda x: -x["permutation_auc_drop"])[:3]
-        lines.append("置换重要性前三：" + "、".join(
-            f"{x['feature']}（AUC 下降 {x['permutation_auc_drop']:.3f}）" for x in imp))
-        tools.append("loan.importance")
-
-    if "segments" in foci:
-        seg = d["segments"]
-        high_credit = max(seg["credit"], key=lambda x: x["default_pct"])
-        high_debt = max(seg["debt"], key=lambda x: x["default_pct"])
-        lines.append(
-            f"违约率最高分群：信用分 {high_credit['band']} 为 "
-            f"{_fmt_pct(high_credit['default_pct'])}；负债率 {high_debt['band']} 为 "
-            f"{_fmt_pct(high_debt['default_pct'])}")
-        tools.append("loan.segments")
-
-    if not lines:
-        lines, tools = d["insights"][:4], ["loan.overview"]
-    return lines, tools
 
 
 def _rental_answer(foci):
@@ -861,17 +693,33 @@ def _jobs_answer(foci):
 
     lines.append(
         f"采样提醒：{_fmt_pct(o['top_date_share_pct'])} 的岗位集中在 {o['top_date']}，"
-        "日度趋势反映抓取节奏，不是真实招聘周期")
+        "发布时间口径及采集节奏未核实，不能据此推断真实招聘周期")
     return lines, tools
 
 
+def _portfolio_answer(module, foci):
+    d = PORTFOLIO_LOADERS[module]()
+    lines = list(d["insights"])
+    if module == "housing" and "neighborhoods" in foci:
+        rows = sorted(d["neighborhoods"], key=lambda r: -r["median_price"])[:3]
+        lines.append("样本社区售价中位数：" + "；".join(f"{r['name']} ${r['median_price']:,.0f}（{r['count']}套）" for r in rows))
+    if module == "movies" and "genres" in foci:
+        lines.append("类型样本量：" + "；".join(f"{r['tag']} {r['count']}部" for r in d['genres'][:6]) + "；多标签重复计数。")
+    if module == "movies" and "ratings" in foci:
+        lines.append("评分与log(1+票房亿元)相关系数：" + "；".join(f"{r['name']} {r['pearson_log_revenue']:.3f}（{r['count']}部）" for r in d['correlations']))
+    if module == "survey" and "attributes" in foci:
+        lines.append("属性认同率：" + "；".join(f"{r['name']} {r['yes_pct']:.1f}%" for r in d['attributes']))
+    if module == "survey" and "visits" in foci:
+        lines.append("各到访频率平均好感分：" + "；".join(f"{r['name']} {r['mean_like']:.2f}（{r['count']}人）" for r in d['visits']))
+    if module == "survey" and "ages" in foci:
+        lines.append("年龄组平均好感分：" + "；".join(f"{r['name']} {r['mean_like']:.2f}（{r['count']}人）" for r in d['ages']))
+    return lines + [d["data_notes"][0]], [module + "." + (foci[0] if foci else "overview")]
+
+
 _FALLBACK_BUILDERS = {
-    "food": _food_answer,
-    "game": _game_answer,
-    "retention": _retention_answer,
-    "loan": _loan_answer,
-    "rental": _rental_answer,
-    "jobs": _jobs_answer,
+    "food": _food_answer, "rental": _rental_answer, "jobs": _jobs_answer,
+    "retailrocket": lambda foci: (get_retailrocket_analysis()["insights"] + ["历史匿名样本，首次观察不是注册。"], ["retailrocket.overview"]),
+    **{key: (lambda foci, module=key: _portfolio_answer(module, foci)) for key in PORTFOLIO_LOADERS},
 }
 
 
@@ -879,6 +727,8 @@ def _fallback_agent(msg, history):
     """没有 API Key / LLM 失败时的规则编排：调用同一分析层，按问题字段作答。"""
     msg_text = str(msg).lower()
     modules = _match_modules(msg_text, PRIMARY_KEYS) or _match_modules(msg_text, MODULE_KEYS)
+    if "retailrocket" in modules and not any(word in msg_text for word in ("对比", "比较", "模拟")):
+        modules = ["retailrocket"]
     context_text = ""
     if not modules:
         # 只有当前问题没提模块时，才继承最近一条带模块的历史问题；
@@ -895,17 +745,7 @@ def _fallback_agent(msg, history):
                 break
     text = (msg_text + " " + context_text).strip()
     if not modules:
-        intro = (
-            "我是全栈数据分析平台的 Agent，可以回答 6 个模块的问题：\n"
-            "· 北京餐饮（价格带、菜系、区域、评分、米其林、夜宵）\n"
-            "· 游戏评论（情感、评分对照、主题、平台）\n"
-            "· 用户留存（队列矩阵、渠道、设备、流失）\n"
-            "· 贷款违约（AUC/KS、阈值决策、校准、分群）\n"
-            "· 北京租房（分房型区域价格、面积效应、配套）\n"
-            "· 数据岗招聘（薪资解析、城市、经验、学历、岗位族）\n\n"
-            "试试问：「北京哪个区餐厅最多？」"
-            "「数据岗里哪个方向薪资最高？」「贷款阈值应该定多少？」"
-        )
+        intro = "可以问我北京餐饮、消费者调查、美国房价、国产电影、北京租房、数据岗招聘和电商行为。真实回访分析位于电商模块；旧游戏评论、模拟留存和贷款模块已撤下。试试：美国房价预测误差多少？电影评分与票房有关吗？"
         if not DEEPSEEK_KEY:
             intro += "\n\n（当前未配置 DEEPSEEK_KEY，由本地规则引擎直接调用分析层。）"
         return {"reply": intro, "tools": []}
@@ -916,7 +756,7 @@ def _fallback_agent(msg, history):
         foci = _infer_foci(m, msg) or _infer_foci(m, text)
         lines, used = _FALLBACK_BUILDERS[m](foci)
         sections.append(
-            f"【{MODULE_LABELS[m]}】\n" + "\n".join(f"· {x}" for x in lines)
+            f"【{MODULE_LABELS[m]}】\n" + "\n".join(f"· {_chat_value(x)}" for x in lines)
         )
         tools.extend(used)
 
@@ -940,19 +780,19 @@ def agent_page():
       <div class="page-head">
         <div class="eyebrow">Agent · Tool Orchestration</div>
         <h1>问数据，而不是翻页面</h1>
-        <p>用自然语言探索六个分析场景。回答引用分析工具的计算结果，支持连续追问与跨模块对比。</p><div class="agent-mode">{"✳ AI 工具编排模式" if DEEPSEEK_KEY else "◈ 本地规则模式 · 已连接分析工具"}</div>
+        <p>用自然语言探索七个分析场景。回答引用分析工具的计算结果，支持连续追问与跨模块对比。</p><div class="agent-mode">{"✳ AI 工具编排模式" if DEEPSEEK_KEY else "◈ 本地规则模式 · 已连接分析工具"}</div>
       </div>
 
       <div class="chatbox" id="chatbox" role="log" aria-label="分析对话" aria-live="polite">
-        <div class="msg agent">👋 你好，我是数据分析 Agent。可以问我北京餐饮的真实人均、具体餐厅推荐、游戏评论的情感与评分错位、留存渠道差异、贷款阈值、租房口径或数据岗薪资。也可以连续追问，比如「数据岗哪个方向薪资最高？再按城市拆一下」。</div>
+        <div class="msg agent">👋 你好，我是数据分析 Agent。可以问我北京餐饮的真实人均、具体餐厅推荐、消费者的品牌认知、美国房价预测误差、电影票房与评分、电商回访、租房口径或数据岗薪资。也可以连续追问，比如「数据岗哪个方向薪资最高？再按城市拆一下」。</div>
       </div>
 
       <div class="suggestions">
         <button data-q="北京餐饮人均消费的真实中位数是多少？为什么不能直接用平均值？">餐饮真实人均</button>
         <button data-q="我想去北京吃饭，帮我推荐一家评分高、评论多的店">餐厅推荐</button>
-        <button data-q="游戏评论文本情感和用户评分为什么会对不上？">情感与评分错位</button>
-        <button data-q="哪个渠道的用户留存最好？广告投放值得继续吗？">渠道留存质量</button>
-        <button data-q="贷款模型的阈值应该定多少？为什么不是 0.5？">贷款最优阈值</button>
+        <button data-q="电影的评分和票房有什么关系？">电影评分与票房</button>
+        <button data-q="电商访客第7日回访率是多少？">电商真实回访</button>
+        <button data-q="美国房价模型的验证误差是多少？">美国房价预测</button>
         <button data-q="北京租房整租和合租的单价差异说明什么？">整租 vs 合租</button>
         <button data-q="数据岗里哪个方向薪资最高？再按城市拆一下">岗位族与城市</button>
       </div>
@@ -1002,22 +842,10 @@ def api_food():
     return JSONResponse(get_food_analysis())
 
 
-@app.get("/api/game")
-def api_game():
-    """游戏评论：VADER 文本情感 + 评分对照 + 主题词典。"""
-    return JSONResponse(get_game_analysis())
 
 
-@app.get("/api/retention")
-def api_retention():
-    """用户留存：注册周队列矩阵 + 渠道/设备差异。"""
-    return JSONResponse(get_retention_analysis())
 
 
-@app.get("/api/loan")
-def api_loan():
-    """贷款违约：ROC/PR、KS、阈值决策、校准与分群。"""
-    return JSONResponse(get_loan_analysis())
 
 
 @app.get("/api/rental")
@@ -1035,6 +863,39 @@ def api_jobs():
 @app.get("/health")
 def health():
     return {"status": "ok", "modules": list(MODULE_MAP)}
+
+
+
+
+@app.get("/module/retailrocket", response_class=HTMLResponse)
+def page_retailrocket():
+    return _module_page("retailrocket")
+
+
+@app.get("/api/retailrocket")
+def api_retailrocket():
+    return JSONResponse(get_retailrocket_analysis())
+
+
+
+
+@app.get("/module/{slug}", response_class=HTMLResponse)
+def page_portfolio(slug: str):
+    if slug in {"game": "survey", "loan": "movies", "retention": "retailrocket"}:
+        return RedirectResponse("/module/" + {"game": "survey", "loan": "movies", "retention": "retailrocket"}[slug], status_code=307)
+    if slug in MODULE_MAP:
+        return _module_page(slug)
+    return HTMLResponse("未找到分析模块", status_code=404)
+
+@app.get("/api/{slug}")
+def api_portfolio(slug: str):
+    if slug in ("game", "loan", "retention"):
+        return JSONResponse({"error": "该模块已撤下", "replacement": {"game": "survey", "loan": "movies", "retention": "retailrocket"}[slug]}, status_code=410)
+    loaders = {**PORTFOLIO_LOADERS, "retailrocket": get_retailrocket_analysis,
+               "food": get_food_analysis, "rental": get_rental_analysis, "jobs": get_jobs_analysis}
+    if slug not in loaders:
+        return JSONResponse({"error": "未知模块"}, status_code=404)
+    return JSONResponse(loaders[slug]())
 
 
 if __name__ == "__main__":
