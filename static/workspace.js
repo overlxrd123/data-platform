@@ -1,5 +1,5 @@
 (() => {
-  const names = ['电商行为', '北京餐饮', '北京租房', '数据岗招聘', '美国房价', '消费者调查', '国产电影'];
+  const names = ['电商行为', '北京餐饮', '北京租房', '数据岗招聘', '美国房价', '麦当劳消费者认知', '国产电影'];
   C.chart('datasetChart', {
     grid: {left: 0, right: 60, top: 5, bottom: 0, containLabel: true},
     xAxis: C.valAxis({type:'log', min:100, show:false}),

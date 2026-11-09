@@ -375,7 +375,7 @@ def get_food_analysis() -> dict:
         f"价格数据覆盖 {overview['price_coverage_pct']}%（{len(valid):,}/{len(df):,} 家），"
         f"其余 {overview['stores'] - len(valid):,} 家人均消费记为 0，是未采集而非免费，已剔除。",
         f"有效样本人均消费中位数 ¥{overview['price_median']}，"
-        f"P90 为 ¥{overview['price_p90']}——八成店铺人均在 145 元以内，北京餐饮主体仍是大众消费。",
+        f"P90 为 ¥{overview['price_p90']}——约九成有效样本不超过该价位，当前样本以大众价位为主。",
         f"区域价差显著：{priciest_district['name']}中位价 ¥{priciest_district['median_price']}，"
         f"{cheapest_district['name']}仅 ¥{cheapest_district['median_price']}，相差 "
         f"{priciest_district['median_price'] / max(cheapest_district['median_price'], 1):.1f} 倍。",
@@ -383,9 +383,9 @@ def get_food_analysis() -> dict:
         f"前 10% 拿走 {concentration['top10_pct_share']}%，而 {overview['zero_review_pct']}% 的店铺一条评论都没有。",
         f"评分与价格只有弱相关（Spearman {rating['price_rating_corr']}）："
         f"均价从 30 元以下的 4.47 分升到 200 元以上的 4.66 分，"
-        "方向对但差距很小——贵不等于好吃，高价更多来自品类和商圈定位。",
+        "差距较小；品类和商圈结构也可能影响结果，不能解释为涨价会提高评分。",
         f"原始推荐标签各组的价格差异明显（标签来源未核实）：银牌中位价 ¥{michelin[0]['median_price']}，"
-        f"金牌 ¥{michelin[1]['median_price']}，铂金及以上进入千元档。",
+        f"金牌 ¥{michelin[1]['median_price']}；部分标签组中位价达到千元，但组内样本较少。",
         f"在有完整营业时段的 {late_night['parsed_stores']:,} 家店里，"
         f"{late_night['late_pct_of_parsed']}% 营业到 23 点以后；"
         f"夜宵比例最高的是{late_night['top_districts'][0]['name']}"

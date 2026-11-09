@@ -13,7 +13,7 @@
     const configs = {
       housing:['美国房屋成交价格','AMES HOUSING','从房屋特征理解成交价格，检验预测误差。'],
       movies:['国产电影分析','CHINESE MOVIES','同一份电影样本，观察票房、评分与类型的关系。'],
-      survey:['麦当劳消费者调查','CONSUMER SURVEY','从品牌认知、到访频率和好感差异理解消费者。']
+      survey:['麦当劳消费者认知','CONSUMER SURVEY','从品牌认知、到访频率和好感差异理解消费者。']
     };
     const [title,en,desc]=configs[slug];
     const kpis = slug==='housing' ? [

@@ -2,7 +2,7 @@
   const app = document.getElementById('app');
   if (!app) return;
   function enhance() {
-    const head = app.querySelector('.page-head');
+    const head = app.querySelector('.page-head,.page-hero');
     if (!head || app.querySelector('.section-nav')) return;
     const panels = [...app.querySelectorAll('section.panel')];
     const nav = document.createElement('nav');

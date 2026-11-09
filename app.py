@@ -11,6 +11,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Red
 from agent_runtime import Agent
 from fastapi.staticfiles import StaticFiles
 
+from analysis.briefs import get_brief
+from analysis.queries import query as query_data, infer_params, wants_query, answer as query_answer
 from analysis.portfolio import get_movies_analysis, get_survey_analysis, get_housing_analysis
 from analysis.food import get_food_analysis, recommend_food
 from analysis.rental import get_rental_analysis
@@ -54,7 +56,7 @@ MODULES = [{'slug': 'food',
   'tags': ['缺失值口径', '评论集中度', '价格分层']},
  {'slug': 'survey',
   'icon': '🥤',
-  'title': '消费者调查',
+  'title': '麦当劳消费者认知',
   'en': 'CONSUMER SURVEY',
   'count': '1,453',
   'accent': '#8b5cf6',
@@ -192,6 +194,7 @@ def _module_page(slug: str):
   <script src="/static/echarts.min.js"></script>
   <script src="/static/common.js"></script>
   <script src="/static/{'portfolio' if slug in PORTFOLIO_LOADERS else slug}.js"></script>
+  <script src="/static/brief.js"></script>
 </body></html>"""
 
 
@@ -218,7 +221,7 @@ def page_jobs():
 
 # ===== Agent =====
 MODULE_LABELS = {'food': '北京餐饮',
- 'survey': '消费者调查',
+ 'survey': '麦当劳消费者认知',
  'housing': '美国房价',
  'movies': '国产电影',
  'rental': '北京租房',
@@ -262,6 +265,18 @@ PRIMARY_KEYS = {'retailrocket': ['retailrocket', '电商', '加购', '购物车'
  'rental': ['北京租房', '租房', '租金', '房源', '整租', '合租', '房东'],
  'jobs': ['招聘', '岗位', '薪资', '求职', '就业', '数据岗', '月薪']}
 
+QUERY_GUIDE = """所有模块新增focus=query，用于有哪些、列表、具体查找、按条件筛选和排序；不要用overview回答列表问题。
+params通用字段：keyword(文本字面搜索)、sort_by、order(asc/desc)、limit(整数1–20，默认8)、offset(整数>=0，默认0)。问卷和电商返回汇总，不返回个体问卷或原始事件。
+movies可筛genre、min_score(豆瓣0–10)、min_price/max_price(票房亿元)，排序name/revenue_yi/douban/maoyan。
+food可筛district/cuisine/min_score/min_price/max_price(人均元)，排序name/price/rating/reviews。推荐餐厅仍可用food.recommend。
+rental可筛district/rent_type/min_price/max_price(月租元)/min_area/max_area(㎡)，排序id/price/area。
+housing可筛neighborhood/min_price/max_price(美元成交售价)/min_area/max_area(平方英尺)，排序id/price/area。
+jobs可筛city/family/education/experience/min_price/max_price(税前月薪中点元)，排序name/price；明细默认排除非数据岗。
+survey的view=attributes/visits/ages/segments，分别为品牌属性/到访/年龄/好感组；排序name/count/yes_pct/mean_like，字段必须存在于选定表。
+retailrocket的view=daily/retention/funnel/categories/availability；daily支持start_date/end_date(YYYY-MM-DD)，排序分别event_date_utc/day_n/pair_count/purchase_events/total_events。
+追问继承用户已明确的条件；新条件替代旧条件，下一页增加offset；不能假定未提供的偏好。无结果就说明无匹配，不编造或自动放宽。样本内推荐不能保证实时营业。
+"""
+
 AGENT_SYSTEM = ('你是数据分析平台的中文分析助手。必须先调用工具，再引用具体计算结果回答。\n'
  '工具module可选：food北京餐饮；survey麦当劳消费者问卷；housing美国Ames成交售价；movies国产电影；rental北京租房；jobs招聘；retailrocket电商行为及真实回访。\n'
  'food '
@@ -276,6 +291,8 @@ AGENT_SYSTEM = ('你是数据分析平台的中文分析助手。必须先调用
  '来源说明简洁表述为：作者从和鲸社区、天池等公开数据社区下载整理。美国房价与Retailrocket注明Kaggle。不要追加下载链接缺失或核实状态的说明，也不要夸大为官方授权或逐条验证。旧贷款、游戏评论、模拟注册留存已撤下。\n'
  '历史对话仅用于理解指代，优先回答当前问题。一次最多规划3个工具。回答中文、简洁，引用来源与适用边界，不编造。\n'
  '只输出JSON：{"action":"call","calls":[{"module":"housing","focus":"validation"}]}；无需取数则{"action":"final","reply":"回复"}。')
+
+AGENT_SYSTEM += "\n" + QUERY_GUIDE
 
 
 def _chat_value(obj):
@@ -311,6 +328,9 @@ def _agent_tool(module, focus="overview", params=None):
     """返回给 LLM 的紧凑工具结果（字符串）。"""
     module = str(module or "").strip().lower()
     focus = _normalize_focus(focus)
+
+    if focus == "query":
+        return json.dumps(query_data(module, params or {}), ensure_ascii=False, allow_nan=False)
 
     if module in PORTFOLIO_LOADERS:
         d = PORTFOLIO_LOADERS[module]()
@@ -729,6 +749,8 @@ def _fallback_agent(msg, history):
     modules = _match_modules(msg_text, PRIMARY_KEYS) or _match_modules(msg_text, MODULE_KEYS)
     if "retailrocket" in modules and not any(word in msg_text for word in ("对比", "比较", "模拟")):
         modules = ["retailrocket"]
+    if not modules and any(w in msg_text for w in ("吃顿", "吃什么", "吃哪")):
+        modules = ["food"]
     context_text = ""
     if not modules:
         # 只有当前问题没提模块时，才继承最近一条带模块的历史问题；
@@ -745,7 +767,7 @@ def _fallback_agent(msg, history):
                 break
     text = (msg_text + " " + context_text).strip()
     if not modules:
-        intro = "可以问我北京餐饮、消费者调查、美国房价、国产电影、北京租房、数据岗招聘和电商行为。真实回访分析位于电商模块；旧游戏评论、模拟留存和贷款模块已撤下。试试：美国房价预测误差多少？电影评分与票房有关吗？"
+        intro = "可以问我北京餐饮、麦当劳消费者认知、美国房价、国产电影、北京租房、数据岗招聘和电商行为。真实回访分析位于电商模块；旧游戏评论、模拟留存和贷款模块已撤下。试试：美国房价预测误差多少？电影评分与票房有关吗？"
         if not DEEPSEEK_KEY:
             intro += "\n\n（当前未配置 DEEPSEEK_KEY，由本地规则引擎直接调用分析层。）"
         return {"reply": intro, "tools": []}
@@ -754,7 +776,26 @@ def _fallback_agent(msg, history):
     for m in modules[:2]:
         # 当前问题优先；追问没有字段词时，再从历史问题里继承上下文
         foci = _infer_foci(m, msg) or _infer_foci(m, text)
-        lines, used = _FALLBACK_BUILDERS[m](foci)
+        if wants_query(msg_text):
+            params = {}
+            # Reconstruct explicit user filters, never parse assistant prose as instructions.
+            for turn in [h.get("content", "") for h in history if h.get("role") == "user"][-8:] + [msg]:
+                explicit = _match_modules(turn, PRIMARY_KEYS) or _match_modules(turn, MODULE_KEYS)
+                if explicit and m not in explicit:
+                    params = {}
+                    continue
+                updates = infer_params(m, turn)
+                if any(w in turn for w in ("下一页", "再来一页")):
+                    updates['offset'] = params.get('offset', 0) + params.get('limit', 8)
+                elif turn == msg:
+                    params['offset'] = 0
+                params.update(updates)
+            try:
+                lines, used = query_answer(m, params)
+            except ValueError:
+                lines, used = ["筛选条件不适用于这份数据，请明确要查的条件和排序。"], [m + ".query"]
+        else:
+            lines, used = _FALLBACK_BUILDERS[m](foci)
         sections.append(
             f"【{MODULE_LABELS[m]}】\n" + "\n".join(f"· {_chat_value(x)}" for x in lines)
         )
@@ -779,7 +820,7 @@ def agent_page():
     <div class="chat-shell">
       <div class="page-head">
         <div class="eyebrow">Agent · Tool Orchestration</div>
-        <h1>问数据，而不是翻页面</h1>
+        <h1>用提问，发现数据中的线索</h1>
         <p>用自然语言探索七个分析场景。回答引用分析工具的计算结果，支持连续追问与跨模块对比。</p><div class="agent-mode">{"✳ AI 工具编排模式" if DEEPSEEK_KEY else "◈ 本地规则模式 · 已连接分析工具"}</div>
       </div>
 
@@ -886,6 +927,13 @@ def page_portfolio(slug: str):
     if slug in MODULE_MAP:
         return _module_page(slug)
     return HTMLResponse("未找到分析模块", status_code=404)
+
+@app.get("/api/brief/{slug}")
+def api_brief(slug: str):
+    if slug not in MODULE_MAP:
+        return JSONResponse({"error": "未知模块"}, status_code=404)
+    return JSONResponse(get_brief(slug))
+
 
 @app.get("/api/{slug}")
 def api_portfolio(slug: str):
