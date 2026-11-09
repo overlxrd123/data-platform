@@ -12,7 +12,8 @@ from agent_runtime import Agent
 from fastapi.staticfiles import StaticFiles
 
 from analysis.briefs import get_brief
-from analysis.queries import query as query_data, infer_params, wants_query, answer as query_answer
+from analysis.queries import (query as query_data, infer_params, wants_query, answer as query_answer,
+                              job_city_request, job_city_params)
 from analysis.portfolio import get_movies_analysis, get_survey_analysis, get_housing_analysis
 from analysis.food import get_food_analysis, recommend_food
 from analysis.rental import get_rental_analysis
@@ -272,6 +273,7 @@ food可筛district/cuisine/min_score/min_price/max_price(人均元)，排序name
 rental可筛district/rent_type/min_price/max_price(月租元)/min_area/max_area(㎡)，排序id/price/area。
 housing可筛neighborhood/min_price/max_price(美元成交售价)/min_area/max_area(平方英尺)，排序id/price/area。
 jobs可筛city/family/education/experience/min_price/max_price(税前月薪中点元)，排序name/price；明细默认排除非数据岗。
+招聘城市数量/分布/排名必须用jobs.cities，支持上述筛选和limit/offset；先筛全部岗位再按城市汇总，默认按count降序，薪资比较按monthly_median。数据分析岗位要传family=数据分析，不能拿前8条明细代替整体城市分布。
 survey的view=attributes/visits/ages/segments，分别为品牌属性/到访/年龄/好感组；排序name/count/yes_pct/mean_like，字段必须存在于选定表。
 retailrocket的view=daily/retention/funnel/categories/availability；daily支持start_date/end_date(YYYY-MM-DD)，排序分别event_date_utc/day_n/pair_count/purchase_events/total_events。
 追问继承用户已明确的条件；新条件替代旧条件，下一页增加offset；不能假定未提供的偏好。无结果就说明无匹配，不编造或自动放宽。样本内推荐不能保证实时营业。
@@ -415,12 +417,10 @@ def _agent_tool(module, focus="overview", params=None):
         return _json_text(payload)
 
     if module == "jobs":
-        d = get_jobs_analysis()
         if focus == "cities":
-            payload = {"overview": d["overview"], "cities": d["cities"],
-                       "city_controlled": d["city_controlled"],
-                       "insights": d["insights"][:6]}
-        elif focus == "families":
+            return _json_text(query_data('jobs', {**(params or {}), 'view': 'cities'}))
+        d = get_jobs_analysis()
+        if focus == "families":
             payload = {"families": d["families"], "insights": d["insights"][:5]}
         elif focus == "experience":
             payload = {"experience": d["experience"], "insights": d["insights"][:5]}
@@ -776,7 +776,10 @@ def _fallback_agent(msg, history):
     for m in modules[:2]:
         # 当前问题优先；追问没有字段词时，再从历史问题里继承上下文
         foci = _infer_foci(m, msg) or _infer_foci(m, text)
-        if wants_query(msg_text):
+        city_followup = m == 'jobs' and job_city_request(msg_text, history)
+        if city_followup:
+            lines, used = query_answer('jobs', job_city_params(msg, history))
+        elif wants_query(msg_text):
             params = {}
             # Reconstruct explicit user filters, never parse assistant prose as instructions.
             for turn in [h.get("content", "") for h in history if h.get("role") == "user"][-8:] + [msg]:

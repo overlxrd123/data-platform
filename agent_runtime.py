@@ -180,6 +180,19 @@ class Agent:
             calls = decision.get("calls")
             if calls is None and decision.get("action") in ("call", "tool"):
                 calls = [decision]
+            from analysis.queries import job_city_request, job_city_params
+            job_context = any(k in msg for k in ('岗位', '招聘', '薪资', '求职', '数据分析')) or any(
+                any(k in h.get('content','') for k in ('岗位','招聘','求职')) for h in history[-8:] if h.get('role')=='user')
+            if any(k in msg for k in ('电影','餐饮','租房','房价','问卷','电商')) and not any(k in msg for k in ('岗位','招聘','薪资','求职')):
+                job_context = False
+            needs_job_cities = 'jobs' in self.labels and job_context and job_city_request(msg, history)
+            if needs_job_cities:
+                # Semantic guard: even a syntactically valid record-list/final plan
+                # cannot answer a city distribution question from a paginated sample.
+                job_calls = [c for c in (calls or []) if c.get('module', c.get('tool')) == 'jobs']
+                city_call = {'module':'jobs', 'focus':'cities',
+                             'params':(job_calls[0].get('params') or {}) if job_calls else {}}
+                calls = [c for c in (calls or []) if c.get('module', c.get('tool')) != 'jobs'][:2] + [city_call]
             wants_food = (any(k in msg for k in ("推荐", "哪家", "好吃", "吃什么", "吃哪")) and
                           any(k in msg for k in ("餐饮", "餐厅", "美食", "吃饭", "餐馆", "饭馆", "夜宵")))
             if decision.get("action") == "final" and not calls and not wants_food:
@@ -215,6 +228,9 @@ class Agent:
                     raise ModelFailure("invalid_params")
                 if focus == "query":
                     params = {**infer_params(module, msg), **(params or {})}
+                if module == 'jobs' and (focus == 'cities' or (focus == 'query' and (params or {}).get('view') == 'cities')):
+                    focus = 'cities'
+                    params = job_city_params(msg, history, params)
                 name = f"{module}.{focus}"
                 if name in tools:
                     continue
@@ -239,6 +255,7 @@ class Agent:
                     "说明工具中的筛选放宽情况。来源只简洁注明作者从和鲸社区、天池等公开数据社区下载整理；"
                     "Kaggle项目则注明Kaggle，不将所有项目写成来自同一个社区。不要主动补充下载链接缺失或核实状态，"
                     "也不要称官方授权或逐条验证。保留必要的指标分母、时间窗口和样本范围。用简洁中文直接回答，按问题组织回答，优先给具体结果；列表只展示工具返回的当前页，保留匹配总数和单位，不用概览替代片名、店名或岗位。"
+                    "招聘城市汇总中matching_jobs为全部匹配岗位数，total_matches为城市数，count为每城岗位数；不要把本页城市数或岗位明细页数当成全部岗位数，不得将采集样本外推为全市场。"
                     "使用普通文本和换行，不输出JSON、Markdown标记或内部字段名。")},
                 *history, {"role": "user", "content": msg},
                 {"role": "user", "content": "本次工具结果：\n"+json.dumps(results, ensure_ascii=False)}]
@@ -304,9 +321,9 @@ class Agent:
             if focus not in FOCUSES[module]: raise ModelFailure("invalid_focus")
             params = call.get("params")
             if params is not None and not isinstance(params, dict): raise ModelFailure("invalid_params")
-            if focus == "query":
+            if focus == "query" or (module == 'jobs' and focus == 'cities'):
                 from analysis.queries import validate_params
-                try: validate_params(module, params or {})
+                try: validate_params(module, {**(params or {}), **({'view':'cities'} if focus=='cities' else {})})
                 except (ValueError, TypeError): raise ModelFailure("invalid_params") from None
 
     async def _plan(self, client, messages, request_id):

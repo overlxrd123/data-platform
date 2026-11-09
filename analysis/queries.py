@@ -11,9 +11,9 @@ FILTERS={
  'jobs':{'city','family','education','experience','min_price','max_price'},
  'survey':set(), 'retailrocket':{'start_date','end_date'},
 }
-VIEWS={'survey':{'attributes','visits','ages','segments'},'retailrocket':{'daily','retention','funnel','categories','availability'}}
+VIEWS={'jobs':{'records','cities'},'survey':{'attributes','visits','ages','segments'},'retailrocket':{'daily','retention','funnel','categories','availability'}}
 SORTS={'movies':{'name','revenue_yi','douban','maoyan'},'food':{'name','price','rating','reviews'},
-       'rental':{'id','price','area'},'housing':{'id','price','area'},'jobs':{'name','price'},
+       'rental':{'id','price','area'},'housing':{'id','price','area'},'jobs':{'name','price','city','count','share_pct','monthly_median'},
        'survey':{'name','count','yes_pct','mean_like'},'retailrocket':{'event_date_utc','day_n','pair_count','total_events','purchase_events','active_visitors','buying_visitors','daily_buyer_rate_pct','retention_rate_pct'}}
 
 
@@ -35,6 +35,9 @@ def validate_params(module, params):
     if p.get('order','desc') not in ('asc','desc'):raise ValueError('invalid order')
     if 'sort_by' in p and p['sort_by'] not in SORTS[module]:raise ValueError('invalid sort')
     if 'view' in p and p['view'] not in VIEWS.get(module,{'records'}):raise ValueError('invalid view')
+    if module=='jobs' and 'sort_by' in p:
+        sorts={'records':{'name','price'},'cities':{'city','count','share_pct','monthly_median','price'}}
+        if p['sort_by'] not in sorts[p.get('view','records')]:raise ValueError('sort not supported by view')
     if module=='survey' and 'sort_by' in p:
         columns={'attributes':{'name','yes_pct'},'visits':{'name','count','mean_like'},'ages':{'name','count','mean_like'},'segments':{'name','count'}}
         if p['sort_by'] not in columns[p.get('view','attributes')]:raise ValueError('sort not supported by view')
@@ -99,14 +102,80 @@ def query(module,params=None):
         if key in p:
             if 'event_date_utc' not in d:raise ValueError('date filters require daily view')
             d=d[getattr(d.event_date_utc,op)(p[key])]
+    matching_jobs = None
+    if module=='jobs' and view=='cities':
+        # Aggregate the entire filtered sample BEFORE sorting and pagination.
+        matching_jobs=len(d)
+        d=d.assign(city=d['city'].fillna('').replace('', '未知城市'))
+        d=d.groupby('city',dropna=False).agg(count=('name','size'),monthly_median=('price','median')).reset_index()
+        d['share_pct']=(d['count']/matching_jobs*100).round(2) if matching_jobs else 0.0
+        d['monthly_median']=d['monthly_median'].round(2)
+        default_sort='count'
+        units='count为历史招聘样本条数；share_pct分母为全部筛选匹配岗位；monthly_median为税前月薪区间中点的中位数（人民币）；仅代表采集样本，不代表全市场或实时在招岗位'
     sort=p.get('sort_by',default_sort)
+    if module=='jobs' and view=='cities' and sort=='price':sort='monthly_median'
     if sort not in d:raise ValueError('sort not supported by selected view')
     # Stable pagination, nulls always last; no random truncation.
-    d=d.sort_values(sort,ascending=p.get('order','desc')=='asc',kind='stable',na_position='last')
+    d=d.sort_values([sort,'city'] if matching_jobs is not None and sort!='city' else sort,
+                    ascending=[p.get('order','desc')=='asc',True] if matching_jobs is not None and sort!='city' else p.get('order','desc')=='asc',
+                    kind='stable',na_position='last')
     total=len(d); rows=records(d.iloc[p['offset']:p['offset']+p['limit']])
-    return {'module':module,'view':view,'filters':p,'total_matches':total,'offset':p['offset'],'limit':p['limit'],
+    result={'module':module,'view':view,'filters':p,'total_matches':total,'offset':p['offset'],'limit':p['limit'],
             'has_more':p['offset']+len(rows)<total,'rows':rows,'units':units,
             'message':'没有符合条件的记录，请调整筛选条件。' if not total else '仅列出当前页；数量以total_matches为准。'}
+    if matching_jobs is not None:
+        result['matching_jobs']=matching_jobs
+        result['message']='先筛选完整岗位样本，再按城市汇总；total_matches为城市数，matching_jobs为岗位总数。'
+    return result
+
+
+def job_city_intent(text):
+    """Identify city-level questions, keeping job-list requests as records."""
+    return bool(re.search(r'哪些城市|哪个城市|各(?:个)?城市|按城市|城市.{0,8}(?:分布|排名|排行|最多|较多|比较多|数量|占比|更高|最高)',text))
+
+
+def job_city_request(text, history=()):
+    if job_city_intent(text):return True
+    if re.search(r'明细|具体岗位|职位列表|电影|餐饮|租房|房价|问卷|电商',text):return False
+    if not re.search(r'呢|那|只看|只要|下一页|再来一页|按薪资|按数量',text):return False
+    for turn in reversed(history[-8:]):
+        if turn.get('role')!='user':continue
+        previous=turn.get('content','')
+        if job_city_intent(previous):return True
+        if re.search(r'岗位|招聘|电影|餐饮|租房|房价|问卷|电商',previous):return False
+    return False
+
+
+def job_city_params(text, history=(), model_params=None):
+    """Preserve explicit user filters across follow-ups; never infer from AI prose."""
+    params={}
+    for turn in [h.get('content','') for h in history[-8:] if h.get('role')=='user']:
+        if re.search(r'电影|餐饮|租房|房价|问卷|电商',turn) and not re.search(r'岗位|招聘|薪资|求职',turn):
+            params={}
+            continue
+        updates=infer_params('jobs',turn)
+        if job_city_intent(turn):
+            updates.setdefault('sort_by','monthly_median' if any(w in turn for w in ('薪资','月薪','工资','待遇')) else 'count')
+            updates.setdefault('order','desc')
+        if any(w in turn for w in ('下一页','再来一页')):
+            updates['offset']=params.get('offset',0)+params.get('limit',8)
+        else:updates['offset']=0
+        params.update(updates)
+    # Explicit user filters take precedence over conflicting model defaults.
+    params={**(model_params or {}),**params}
+    previous_offset=params.get('offset',0)
+    explicit=infer_params('jobs',text)
+    if re.search(r'哪些城市|各(?:个)?城市|按城市',text) and 'city' not in explicit:
+        params.pop('city',None)
+    params.update(explicit)
+    params['view']='cities'
+    if job_city_intent(text) and 'sort_by' not in explicit:
+        params['sort_by']='monthly_median' if any(w in text for w in ('薪资','月薪','工资','待遇')) else 'count'
+    if job_city_intent(text):params['order']=explicit.get('order','desc')
+    params.setdefault('sort_by','count')
+    if not any(w in text for w in ('下一页','再来一页')):params['offset']=0
+    else:params['offset']=previous_offset+params.get('limit',8)
+    return validate_params('jobs',params)
 
 
 def infer_params(module,text):
@@ -137,6 +206,13 @@ def infer_params(module,text):
     count=re.findall(r'(?:前|列出|给我)\s*(\d+)\s*(?:个|部|家|条|套)?',text)
     if count:p['limit']=min(20,max(1,int(count[-1])))
     if '前十' in text:p['limit']=10
+    chinese_count=re.search(r'(?:前|最高的?|最低的?|列出|给我)\s*([一二两三四五六七八九十]+)(?:个|部|家|条|套|名|座)?',text)
+    if chinese_count:
+        digits={'一':1,'二':2,'两':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9}
+        value=chinese_count[1]
+        tens,_,ones=value.partition('十')
+        count=(digits.get(tens,1)*10+digits.get(ones,0)) if '十' in value else digits.get(value,8)
+        p['limit']=min(20,max(1,count))
     if any(w in text for w in ['便宜','最低','从低到高']):p.update(sort_by='price',order='asc')
     if module=='movies':
         if '评分' in text:p['sort_by']='douban'
@@ -159,6 +235,18 @@ def wants_query(text):
 
 def answer(module,params):
     result=query(module,params)
+    if module=='jobs' and result['view']=='cities':
+        sort=params.get('sort_by','count')
+        metric='薪资中位数' if sort in ('price','monthly_median') else '岗位数量' if sort in ('count','share_pct') else '城市名称'
+        lines=[f"在当前招聘样本中，符合筛选条件的岗位共{result['matching_jobs']:,}条，分布于{result['total_matches']}个城市。按{metric}{'升序' if params.get('order')=='asc' else '降序'}，本页展示{len(result['rows'])}个城市："]
+        if result['filters'].get('family'):lines.append('岗位族筛选：'+result['filters']['family'])
+        for row in result['rows']:
+            salary=f"，税前月薪中位数约{row['monthly_median']:,.0f}元" if row['monthly_median'] is not None else ''
+            lines.append(f"{row['city']}：{row['count']:,}条，占匹配岗位{row['share_pct']:.2f}%{salary}")
+        if not result['rows']:lines.append('没有符合条件的岗位，请调整筛选条件。')
+        lines.append('按岗位名称分类；占比分母为全部匹配岗位。薪资为区间中点统计，仅代表采集样本，不代表全市场或实时招聘。')
+        if result['has_more']:lines.append('还有更多城市，可以继续问“下一页”。')
+        return lines,['jobs.cities']
     labels={'name':'名称','price':'价格','area':'面积','revenue_yi':'票房亿元','douban':'豆瓣','maoyan':'猫眼','count':'样本数','yes_pct':'认同率%','mean_like':'平均好感','event_date_utc':'日期','day_n':'第N日','retention_rate_pct':'回访率%','pair_count':'访客—商品对','total_events':'事件数','purchase_events':'购买事件','id':'编号','district':'区域','city':'城市','community':'小区','family':'岗位族','salary':'原始薪资','rent_type':'租型','cuisine':'菜系','rating':'评分','reviews':'评论数','neighborhood':'社区'}
     labels.update(active_visitors='活跃访客',buying_visitors='购买访客',daily_buyer_rate_pct='购买访客占比%',eligible_visitors='可观察访客',returned_visitors='回访访客',category_id='类别编号',stage_name='阶段',status='可售状态')
     lines=[f"符合条件共{result['total_matches']}条，本页从第{result['offset']+1}条起列出{len(result['rows'])}条。" if result['rows'] else result['message'],result['units']]
